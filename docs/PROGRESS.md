@@ -12,6 +12,19 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Filter Pattern Tile Enumeration by Local Enrolled Status
+- Built:
+  - Filtered Credential Enumeration (`src/provider/CSampleProvider.cpp`):
+    - In `CSampleProvider::_EnumerateCredentials()`, inspect each user's Provider ID and SID.
+    - Only enumerate a `CSampleCredential` instance if the user is a local account (`Identity_LocalUserProvider`) and is enrolled in Patlock (`SUCCEEDED(patlock::Eligible(pszSid))`).
+    - Unenrolled accounts (and online Microsoft Accounts like MSA which cannot use local Negotiate auth) no longer display the Pattern tile or trigger the "Pattern unavailable" message box on the lock screen.
+- Verified in VM by user:
+  - Phase 4 unlock previously verified.
+- Not verified yet:
+  - Live VM verification that unenrolled accounts do not show the Pattern tile.
+- Next step:
+  - User runs `update.cmd` in VM and tests lock screen behavior across accounts.
+
 ### 2026-11-13: Pure-Logic ArmingGate Integration & Unit Test Suite
 - Built:
   - `ArmingGate` (`src/common/arming_gate.h`): Pure-logic state machine deciding when a new pattern stroke may be started by hovering.
