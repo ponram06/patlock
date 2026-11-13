@@ -19,7 +19,6 @@
 
 CSampleProvider::CSampleProvider():
     _cRef(1),
-    _pCredential(nullptr),
     _fRecreateEnumeratedCredentials(false),
     _cpus(CPUS_INVALID),
     _pCredProviderUserArray(nullptr)
@@ -29,11 +28,7 @@ CSampleProvider::CSampleProvider():
 
 CSampleProvider::~CSampleProvider()
 {
-    if (_pCredential != nullptr)
-    {
-        _pCredential->Release();
-        _pCredential = nullptr;
-    }
+    _ReleaseEnumeratedCredentials();
     if (_pCredProviderUserArray != nullptr)
     {
         _pCredProviderUserArray->Release();
@@ -177,7 +172,7 @@ HRESULT CSampleProvider::GetCredentialCount(
         _CreateEnumeratedCredentials();
     }
 
-    *pdwCount = _pCredential ? 1 : 0;
+    *pdwCount = static_cast<DWORD>(_rgpCredentials.size());
 
     return S_OK;
 }
@@ -188,15 +183,14 @@ HRESULT CSampleProvider::GetCredentialAt(
     DWORD dwIndex,
     _Outptr_result_nullonfailure_ ICredentialProviderCredential **ppcpc)
 {
-    HRESULT hr = E_INVALIDARG;
     if (!ppcpc) return E_POINTER;
     *ppcpc = nullptr;
 
-    if ((dwIndex == 0) && _pCredential)
+    if (dwIndex < _rgpCredentials.size() && _rgpCredentials[dwIndex])
     {
-        hr = _pCredential->QueryInterface(IID_PPV_ARGS(ppcpc));
+        return _rgpCredentials[dwIndex]->QueryInterface(IID_PPV_ARGS(ppcpc));
     }
-    return hr;
+    return E_INVALIDARG;
 }
 
 // This function will be called by LogonUI after SetUsageScenario succeeds.
@@ -231,11 +225,14 @@ void CSampleProvider::_CreateEnumeratedCredentials()
 
 void CSampleProvider::_ReleaseEnumeratedCredentials()
 {
-    if (_pCredential != nullptr)
+    for (CSampleCredential* pCred : _rgpCredentials)
     {
-        _pCredential->Release();
-        _pCredential = nullptr;
+        if (pCred != nullptr)
+        {
+            pCred->Release();
+        }
     }
+    _rgpCredentials.clear();
 }
 
 HRESULT CSampleProvider::_EnumerateCredentials()
@@ -246,25 +243,24 @@ HRESULT CSampleProvider::_EnumerateCredentials()
         DWORD dwUserCount = 0;
         hr = _pCredProviderUserArray->GetCount(&dwUserCount);
         if (FAILED(hr)) return hr;
-        if (dwUserCount > 0)
+        for (DWORD i = 0; i < dwUserCount; ++i)
         {
             ICredentialProviderUser *pCredUser = nullptr;
-            hr = _pCredProviderUserArray->GetAt(0, &pCredUser);
+            hr = _pCredProviderUserArray->GetAt(i, &pCredUser);
             if (SUCCEEDED(hr) && pCredUser)
             {
-                _pCredential = new(std::nothrow) CSampleCredential();
-                if (_pCredential != nullptr)
+                CSampleCredential *pCredential = new(std::nothrow) CSampleCredential();
+                if (pCredential != nullptr)
                 {
-                    hr = _pCredential->Initialize(_cpus, s_rgCredProvFieldDescriptors, s_rgFieldStatePairs, pCredUser);
-                    if (FAILED(hr))
+                    hr = pCredential->Initialize(_cpus, s_rgCredProvFieldDescriptors, s_rgFieldStatePairs, pCredUser);
+                    if (SUCCEEDED(hr))
                     {
-                        _pCredential->Release();
-                        _pCredential = nullptr;
+                        _rgpCredentials.push_back(pCredential);
                     }
-                }
-                else
-                {
-                    hr = E_OUTOFMEMORY;
+                    else
+                    {
+                        pCredential->Release();
+                    }
                 }
                 pCredUser->Release();
             }

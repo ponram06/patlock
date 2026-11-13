@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <strsafe.h>
 #include <new>
+#include <vector>
 
 #include "CSampleCredential.h"
 
@@ -77,7 +78,7 @@ class CSampleProvider : public ICredentialProvider,
     HRESULT _EnumerateEmptyTileCredential();
 private:
     long                                    _cRef;            // Used for reference counting.
-    CSampleCredential                       *_pCredential;    // SampleV2Credential
+    std::vector<CSampleCredential*>         _rgpCredentials;  // Credentials for all users
     bool                                    _fRecreateEnumeratedCredentials;
     CREDENTIAL_PROVIDER_USAGE_SCENARIO      _cpus;
     ICredentialProviderUserArray            *_pCredProviderUserArray;
