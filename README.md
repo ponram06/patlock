@@ -126,7 +126,8 @@ All lock-screen testing should be performed inside a Windows 11 VMware Workstati
    Enter your local account credentials and draw your 5+ dot pattern twice.
 5. **Lock the workstation**:
    Press `Win+L`. Select Pattern, then press-drag-release the enrolled pattern.
-   Windows performs actual authentication. Hover and pausing do not submit.
+   Or hover briefly on a dot, draw without holding a button, and pause for half a
+   second after at least five dots to submit. Windows performs actual authentication.
 6. **Uninstall cleanly**:
    ```powershell
    .\install\uninstall.ps1 -AcknowledgeVm

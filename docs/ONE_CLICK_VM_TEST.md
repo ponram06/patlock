@@ -3,7 +3,7 @@
 Pull the latest repository inside the VMware VM, then double-click
 **RUN_VM_TEST.cmd**. The console remains open so you can read any error.
 
-This launcher only configures, builds and runs the five CTest targets. It does
+This launcher only configures, builds and runs the CTest targets. It does
 not elevate, ask for snapshot/Password confirmations, install/uninstall, delete
 System32 files, enroll an account, restart Windows or change the provider's
 registration. Existing `.patlock-vm-test.json` checkpoints are ignored.

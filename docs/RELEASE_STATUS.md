@@ -13,12 +13,13 @@ Implemented in this pass:
 - Official PCPTool UTF-16 PIN path, silent key operations, key policy/DACL
   requests and authorized reopen/wrapping roundtrip. These do not prove hardware
   authorization/anti-hammering enforcement; TPM_VALIDATION.md lists needed tests.
-- Deliberate press-drag-release; DPI/monitor bounds, high contrast, native
+- Hover-to-start and pause-to-submit (restored at the user's request), with
+  drag/release alternative; DPI/monitor bounds, high contrast, native
   keyboard fallback/status controls and authoritative timed-lockout countdown.
 - Timer/credential lifetime guards, exception containment, no hidden password
   getter exposure, and removal of hardcoded password advice.
 - Password-authenticated enrollment removal; guarded VM build/test script,
-  five executable test targets, x64 VS2022/C++17/static-runtime project support,
+  six executable test targets, x64 VS2022/C++17/static-runtime project support,
   non-destructive packaging with public SHA-256 artifact hashes.
 
 Static verification: source/code review, whitespace checks, PowerShell syntax and

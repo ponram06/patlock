@@ -66,7 +66,9 @@ If any step fails, stop before installation and report the error without secrets
 
 ## UI and real-trackpad acceptance
 
-- [ ] Press-drag-release is required. Hover and pausing do not submit.
+- [ ] Hover briefly to start, draw without clicking and pause 500 ms to submit a
+      valid pattern. Opening/reset on a dot never starts accidentally; moving off
+      the candidate before its dwell finishes prevents start. Drag/release also works.
 - [ ] Capture loss, Escape, fallback and inactivity discard abandoned strokes.
 - [ ] Fallback has keyboard focus and returns to the native sign-in options.
 - [ ] Narrator reads status/fallback; pointer-only grid has Password as keyboard alternative.

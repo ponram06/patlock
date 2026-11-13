@@ -1,4 +1,6 @@
 #include "pattern_window.h"
+#include "arming_gate.h"
+#include "hover_policy.h"
 #include <windows.h>
 #include <windowsx.h>
 #include <gdiplus.h>
@@ -35,9 +37,16 @@ enum class VisualState {
 struct State {
     Pattern pattern;
     bool dragging = false;
+    bool hoverStroke = false;
+    int pendingStartDot = -1;
+    ArmingGate gate;
+    ULONGLONG startDue = 0;
+    ULONGLONG finishDue = 0;
+    ULONGLONG shortDue = 0;
     bool hide = false;
     VisualState visual = VisualState::Drawing;
     POINT previous{};
+    POINT finishAnchor{};
     PatternVerifier verifier = nullptr;
     RetryDelay retryDelay = nullptr;
     DWORD retrySeconds = 0;
@@ -129,7 +138,7 @@ int DotAt(HWND window, POINT pt, int threshold) noexcept {
 }
 
 void UpdateStatus(HWND window, const State& state) noexcept {
-    wchar_t text[96] = L"Press, drag, then release to submit";
+    wchar_t text[96] = L"Hover on a dot, then draw";
     if (state.visual == VisualState::Success) StringCchCopyW(text, ARRAYSIZE(text), L"Pattern accepted");
     else if (state.visual == VisualState::Checking) StringCchCopyW(text, ARRAYSIZE(text), L"Checking pattern...");
     else if (state.visual == VisualState::ErrorTooShort) StringCchPrintfW(text, ARRAYSIZE(text), L"Connect at least %zu dots", MinimumDots);
@@ -138,7 +147,10 @@ void UpdateStatus(HWND window, const State& state) noexcept {
         if (state.passwordRequired) StringCchCopyW(text, ARRAYSIZE(text), L"Pattern unavailable. Use Password.");
         else StringCchPrintfW(text, ARRAYSIZE(text), L"Try again in %lu seconds", state.retrySeconds);
     } else if (state.pattern.count) {
-        StringCchPrintfW(text, ARRAYSIZE(text), L"%zu dots connected; release to submit", state.pattern.count);
+        StringCchPrintfW(text, ARRAYSIZE(text), state.hoverStroke
+            ? L"%zu dots connected; pause to submit" : L"%zu dots connected; release to submit", state.pattern.count);
+    } else if (!state.gate.Armed()) {
+        StringCchCopyW(text, ARRAYSIZE(text), L"Move away, then hover on a dot");
     }
     wchar_t old[96]{};
     GetWindowTextW(state.status, old, ARRAYSIZE(old));
@@ -170,9 +182,17 @@ void ResetStroke(HWND window, State& state) noexcept {
     KillTimer(window, 7);
     state.pattern.Clear();
     state.dragging = false;
+    state.hoverStroke = false;
+    state.pendingStartDot = -1;
+    state.startDue = state.finishDue = state.shortDue = 0;
     state.visual = VisualState::Drawing;
     state.hoverDot = -1;
     if (GetCapture() == window) ReleaseCapture();
+    POINT cursor{};
+    if (!GetCursorPos(&cursor) || !ScreenToClient(window, &cursor)) { EndDialog(window, -1); return; }
+    const Layout grid = Grid(window);
+    state.gate.Disarm(static_cast<int>(cursor.x / state.scale), static_cast<int>(cursor.y / state.scale),
+        DotAt(window, cursor, grid.hitRadius) >= 0);
     UpdateStatus(window, state);
 }
 
@@ -204,6 +224,7 @@ void FinishPattern(HWND window, State& state) noexcept {
     KillTimer(window, 2);
     KillTimer(window, 3);
     KillTimer(window, 7);
+    state.startDue = state.finishDue = state.shortDue = 0;
 
     if (!state.pattern.Valid()) {
         if (state.pattern.count > 0) {
@@ -280,13 +301,14 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         state->fallback = CreateWindowExW(0, L"BUTTON", L"&Other sign-in options",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0,
             window, reinterpret_cast<HMENU>(IDCANCEL), nullptr, nullptr);
-        state->status = CreateWindowExW(0, L"STATIC", L"Press, drag, then release to submit",
+        state->status = CreateWindowExW(0, L"STATIC", L"Hover on a dot, then draw",
             WS_CHILD | WS_VISIBLE | SS_CENTER, 0, 0, 0, 0,
             window, reinterpret_cast<HMENU>(1001), nullptr, nullptr);
         if (!state->fallback || !state->status || !Configure(window, *state, GetDpiForWindow(window), nullptr)) {
             EndDialog(window, -1); return TRUE;
         }
         SetFocus(state->fallback);
+        ResetStroke(window, *state);
         if (state->retryDelay) {
             if (!RefreshRetry(window, *state)) return FALSE;
             if (state->passwordRequired || state->retrySeconds) {
@@ -307,6 +329,73 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
     switch (message) {
     case WM_TIMER:
+        if (wp == 7) {
+            if (!state->startDue) return TRUE;
+            const UINT remaining = HoverPolicy::Remaining(GetTickCount64(), state->startDue);
+            if (remaining) {
+                if (!SetTimer(window, 7, remaining, nullptr)) EndDialog(window, -1);
+                return TRUE;
+            }
+            KillTimer(window, 7);
+            state->startDue = 0;
+            POINT current{};
+            if (!GetCursorPos(&current) || !ScreenToClient(window, &current)) { EndDialog(window, -1); return TRUE; }
+            const int actualDot = DotAt(window, current, Grid(window).hitRadius);
+            if (GetActiveWindow() != window) { ResetStroke(window, *state); return TRUE; }
+            if (HoverPolicy::CanStart(state->pendingStartDot, actualDot, state->gate.Armed(),
+                state->dragging, state->visual == VisualState::Drawing)) {
+                state->pendingStartDot = -1;
+                state->pattern.Clear();
+                state->dragging = true; state->hoverStroke = true;
+                state->previous = current;
+                state->finishAnchor = current;
+                SetCapture(window);
+                if (GetCapture() != window) { ResetStroke(window, *state); return TRUE; }
+                state->pattern.Add(static_cast<BYTE>(actualDot));
+                state->shortDue = GetTickCount64() + HoverPolicy::ShortStrokeDelayMs;
+                if (!SetTimer(window, 3, HoverPolicy::ShortStrokeDelayMs, nullptr)) { EndDialog(window, -1); return TRUE; }
+                UpdateStatus(window, *state);
+            } else state->pendingStartDot = -1;
+            return TRUE;
+        }
+        if (wp == 2 || wp == 3) {
+            ULONGLONG& deadline = wp == 2 ? state->finishDue : state->shortDue;
+            if (!deadline) return TRUE;
+            const UINT remaining = HoverPolicy::Remaining(GetTickCount64(), deadline);
+            if (remaining) {
+                if (!SetTimer(window, wp, remaining, nullptr)) EndDialog(window, -1);
+                return TRUE;
+            }
+            KillTimer(window, wp); deadline = 0;
+            if (!state->hoverStroke || !state->dragging || state->visual != VisualState::Drawing) return TRUE;
+            POINT current{}; RECT bounds{};
+            if (!GetCursorPos(&current) || !ScreenToClient(window, &current) || !GetClientRect(window, &bounds)) {
+                EndDialog(window, -1); return TRUE;
+            }
+            if (GetActiveWindow() != window || GetCapture() != window || !PtInRect(&bounds, current)) {
+                ResetStroke(window, *state); return TRUE;
+            }
+            RECT fallback{};
+            GetWindowRect(state->fallback, &fallback);
+            MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&fallback), 2);
+            if (PtInRect(&fallback, current)) { ResetStroke(window, *state); return TRUE; }
+            const double dx = current.x - state->finishAnchor.x;
+            const double dy = current.y - state->finishAnchor.y;
+            const double tolerance = 3 * state->scale;
+            if (dx * dx + dy * dy > tolerance * tolerance) {
+                Track(window, *state, current);
+                state->finishAnchor = current;
+                const UINT_PTR timer = state->pattern.Valid() ? 2 : 3;
+                const UINT delay = state->pattern.Valid() ? HoverPolicy::FinishDelayMs : HoverPolicy::ShortStrokeDelayMs;
+                state->finishDue = state->shortDue = 0;
+                (timer == 2 ? state->finishDue : state->shortDue) = GetTickCount64() + delay;
+                if (!SetTimer(window, timer, delay, nullptr)) EndDialog(window, -1);
+                return TRUE;
+            }
+            if ((wp == 2 && HoverPolicy::CanFinish(state->hoverStroke, state->dragging, state->pattern.Valid(), true)) ||
+                (wp == 3 && !state->pattern.Valid())) FinishPattern(window, *state);
+            return TRUE;
+        }
         if (wp == 1) {
             state->pattern.Clear();
             if (GetCapture() == window) ReleaseCapture();
@@ -348,6 +437,15 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
     case WM_LBUTTONDOWN: {
         const POINT current = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        // Capture routes a click on the native fallback to this window.
+        RECT fallback{};
+        GetWindowRect(state->fallback, &fallback);
+        MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&fallback), 2);
+        if (PtInRect(&fallback, current)) {
+            state->pattern.Clear(); state->dragging = false;
+            if (GetCapture() == window) ReleaseCapture();
+            EndDialog(window, IDCANCEL); return TRUE;
+        }
 
         if (state->visual != VisualState::Drawing || state->dragging) return TRUE;
 
@@ -356,9 +454,11 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         if (dot < 0) return TRUE;
 
         KillTimer(window, 7);
+        state->startDue = 0;
         state->pattern.Clear();
         state->visual = VisualState::Drawing;
         state->dragging = true;
+        state->hoverStroke = false;
         state->previous = current;
         SetCapture(window);
         if (GetCapture() != window) { ResetStroke(window, *state); return TRUE; }
@@ -373,12 +473,41 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         if (state->visual != VisualState::Drawing) return TRUE;
         const Layout grid = Grid(window);
         state->hoverDot = DotAt(window, current, grid.hitRadius);
+        state->gate.Observe(static_cast<int>(current.x / state->scale), static_cast<int>(current.y / state->scale));
         if (state->dragging) {
-            if (!(wp & MK_LBUTTON) || GetCapture() != window) {
+            RECT bounds{};
+            GetClientRect(window, &bounds);
+            if (state->hoverStroke && !PtInRect(&bounds, current)) { ResetStroke(window, *state); return TRUE; }
+            if ((!state->hoverStroke && !(wp & MK_LBUTTON)) || GetCapture() != window) {
                 ResetStroke(window, *state);
                 return TRUE;
             }
+            const size_t oldCount = state->pattern.count;
             Track(window, *state, current);
+            if (state->hoverStroke) {
+                const double dx = current.x - state->finishAnchor.x;
+                const double dy = current.y - state->finishAnchor.y;
+                const double tolerance = 3 * state->scale;
+                if (state->pattern.count != oldCount || dx * dx + dy * dy > tolerance * tolerance) {
+                    state->finishAnchor = current;
+                    KillTimer(window, 2); KillTimer(window, 3);
+                    state->finishDue = state->shortDue = 0;
+                    const UINT_PTR timer = state->pattern.Valid() ? 2 : 3;
+                    const UINT delay = state->pattern.Valid() ? HoverPolicy::FinishDelayMs : HoverPolicy::ShortStrokeDelayMs;
+                    (timer == 2 ? state->finishDue : state->shortDue) = GetTickCount64() + delay;
+                    if (!SetTimer(window, timer, delay, nullptr)) { state->pattern.Clear(); EndDialog(window, -1); return TRUE; }
+                }
+            }
+        } else if (state->gate.Armed() && state->hoverDot >= 0) {
+            if (state->pendingStartDot != state->hoverDot) {
+                state->pendingStartDot = state->hoverDot;
+                state->startDue = GetTickCount64() + HoverPolicy::StartDelayMs;
+                if (!SetTimer(window, 7, HoverPolicy::StartDelayMs, nullptr)) { EndDialog(window, -1); return TRUE; }
+            }
+        } else {
+            state->pendingStartDot = -1;
+            state->startDue = 0;
+            KillTimer(window, 7);
         }
         UpdateStatus(window, *state);
         return TRUE;
@@ -386,7 +515,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
     case WM_LBUTTONUP: {
         if (state->visual != VisualState::Drawing) return TRUE;
-        if (state->dragging && GetCapture() == window) {
+        if (state->dragging && !state->hoverStroke && GetCapture() == window) {
             Track(window, *state, {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
             FinishPattern(window, *state);
         }
@@ -410,12 +539,14 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
     case WM_DPICHANGED:
         if (state->visual == VisualState::Drawing) ResetStroke(window, *state);
         if (!Configure(window, *state, LOWORD(wp), reinterpret_cast<const RECT*>(lp))) EndDialog(window, -1);
+        else if (state->visual == VisualState::Drawing) ResetStroke(window, *state);
         return TRUE;
 
     case WM_SETTINGCHANGE:
     case WM_SYSCOLORCHANGE:
         if (state->visual == VisualState::Drawing) ResetStroke(window, *state);
         if (!Configure(window, *state, GetDpiForWindow(window), nullptr)) EndDialog(window, -1);
+        else if (state->visual == VisualState::Drawing) ResetStroke(window, *state);
         return TRUE;
 
     case WM_CTLCOLORSTATIC:
@@ -428,7 +559,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         break;
 
     case WM_ACTIVATE:
-        if (LOWORD(wp) == WA_INACTIVE && state->dragging) ResetStroke(window, *state);
+        if (LOWORD(wp) == WA_INACTIVE && state->visual == VisualState::Drawing) ResetStroke(window, *state);
         break;
 
     case WM_CLOSE:

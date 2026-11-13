@@ -12,6 +12,20 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-14: Restored requested hover-to-start input
+- User requested no-click/no-held-button drawing. Restored 120 ms stable hover
+  start, button-free movement and 500 ms pause-to-submit after at least five dots.
+- Retained drag/release alternative, skipped-dot rules, lockouts, accessible
+  fallback and DPI/high-contrast behavior. Opening/reset over a dot is disarmed
+  until deliberate movement. Dwell rechecks actual cursor position. Short strokes
+  time out without an authentication attempt; capture loss/cancel/deactivation
+  clears active strokes. Small pointer jitter does not indefinitely delay finish.
+- Added hover-policy VM test target. No record format change or re-enrollment is
+  required solely for this UI update. Rebuild/reinstall the updated DLL in the VM.
+- Verification: static review/whitespace only; no host build or runtime tests.
+- Review fixes: monotonic timer deadlines reject queued old start/finish events;
+  idle completion rechecks actual cursor, capture, active window and bounds.
+  Leaving the card or moving over fallback cancels instead of being a pause.
 ### 2026-11-14: Test-only CMD workflow and build-tool discovery
 - User reported `VS2022 C++ tools not found` and requested tests alone.
 - Replaced the install/reboot workflow with build/CTest only: no snapshot or

@@ -18,7 +18,8 @@ using PatternVerifier = std::function<VerifyResult(const Pattern& pattern)>;
 // Standard DrawPattern (used by demo or when no verifier provided)
 HRESULT DrawPattern(HINSTANCE instance, HWND owner, bool hideTrail, Pattern& output) noexcept;
 
-// Deliberate press-drag-release input; verification runs only after release.
+// Hover to start, move without holding a button, pause to submit a valid stroke.
+// Press-drag-release remains available as an alternative.
 // Native fallback remains keyboard accessible. The grid itself is pointer input.
 HRESULT DrawPatternInteractive(
     HINSTANCE instance,

@@ -1,5 +1,16 @@
 # Pattern-window implementation and VM acceptance
 
+## Current input update (2026-11-14)
+
+At the user's request, hover-to-start is restored: stable hover for 120 ms starts
+a stroke, movement draws without a button, and a 500 ms pause submits at least
+five dots. Small jitter is tolerated. Short strokes reset after 1.8 seconds
+without authenticating. Click-drag-release remains an alternative. The initial
+pointer-on-dot guard requires deliberate travel after opening/reset; dwell checks
+the actual cursor again, not just a previously queued mouse message. Escape,
+fallback, capture loss and deactivation still cancel. Test this current behavior;
+the original deliberate-only description below is historical.
+
 This checkpoint is source implementation with static inspection only. No host build,
 execution, registration, installation, screen-reader test, VM lock-screen test, or
 real-trackpad validation was performed. This is not a claim of release readiness.
