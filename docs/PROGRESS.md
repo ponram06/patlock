@@ -12,6 +12,20 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: 100% Transparent Lock-Screen Integration, "Other Sign-in Options" Button & Smart Hover Guard
+- Built:
+  - 100% Transparent Lock-Screen Integration: Replaced the dark background card with true `LWA_COLORKEY` transparency (`RGB(2, 4, 6)`), allowing the Windows 11 lock-screen wallpaper to show through 100% cleanly without any dark box or obstruction.
+  - Floating Contrast Dot Discs: Dots now render with circular dark slate backing discs (`RGB(24, 28, 38)`) and bright pearl centers, ensuring high-contrast visibility over both bright sky and dark mountain wallpapers.
+  - Dedicated "Other sign-in options" Button: Integrated a sleek pill button (`[ Other sign-in options ]`) right at the bottom of the grid. Clicking it immediately closes the grid and exposes the standard Windows PIN and Password tiles.
+  - Smart Hover Start Guard: Requires a 150ms intentional hover pause on the starting dot (or an explicit click) before drawing begins. Waving the mouse cursor across dots never triggers an accidental start.
+  - Dot Suppression on Reset & Open: Whenever `Esc` is pressed or the window opens, the exact dot directly under the cursor is added to `suppressStartDot`. It is physically impossible for that dot to auto-start until the user intentionally moves their cursor away.
+- Verified in VM by user:
+  - Phase 4 unlock previously verified.
+- Not verified yet:
+  - Live VM verification of 100% transparent wallpaper integration and sign-in options button.
+- Next step:
+  - User runs `update.cmd` in the VM and tests the transparent lock screen grid.
+
 ### 2026-11-13: Transparent Acrylic Lock-Screen UI, Accidental Start Guard & Esc Reset
 - Built:
   - Transparent Acrylic Aesthetic: Frameless `WS_POPUP` window with `WS_EX_LAYERED` and 80% opacity (`LWA_ALPHA`), allowing the blurred Windows 11 lock screen wallpaper to show through with a dark frosted acrylic glass effect and native rounded corners (`DWMWCP_ROUND`).

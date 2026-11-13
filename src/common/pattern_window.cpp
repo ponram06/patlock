@@ -7,6 +7,8 @@
 namespace patlock {
 namespace {
 
+constexpr COLORREF TransparentKey = RGB(2, 4, 6);
+
 enum class VisualState {
     Drawing,
     Success,
@@ -23,8 +25,8 @@ struct State {
     POINT previous{};
     PatternVerifier verifier = nullptr;
     int hoverDot = -1;
-    POINT initialCursor{};
-    bool armed = false;
+    int suppressStartDot = -1;  // Dot under cursor suppressed from re-starting on open or reset
+    int pendingStartDot = -1;   // Dot waiting for 150ms hover confirmation
 };
 
 struct Layout {
@@ -35,14 +37,20 @@ struct Layout {
     int hitRadius;
 };
 
+RECT SigninButtonRect(int windowWidth) noexcept {
+    const int btnWidth = 200;
+    const int left = (windowWidth - btnWidth) / 2;
+    return {left, 326, left + btnWidth, 358};
+}
+
 Layout Grid(HWND window) noexcept {
     RECT r{};
     GetClientRect(window, &r);
     const int availableWidth = static_cast<int>(r.right);
-    const int spacing = 84;
+    const int spacing = 82;
     const int startX = availableWidth / 2 - spacing;
-    const int startY = 100;
-    return {startX, startY, spacing, 14, 32};
+    const int startY = 96;
+    return {startX, startY, spacing, 14, 30};
 }
 
 POINT Dot(Layout grid, int dot) noexcept {
@@ -87,6 +95,7 @@ void FinishPattern(HWND window, State& state) noexcept {
     if (state.visual != VisualState::Drawing) return;
     KillTimer(window, 2);
     KillTimer(window, 3);
+    KillTimer(window, 7);
 
     if (!state.pattern.Valid()) {
         if (state.pattern.count > 0) {
@@ -108,14 +117,13 @@ void FinishPattern(HWND window, State& state) noexcept {
         if (result == VerifyResult::Success) {
             state.visual = VisualState::Success;
             InvalidateRect(window, nullptr, FALSE);
-            // Allow user to see emerald confirmation for 140ms then close
             SetTimer(window, 4, 140, nullptr);
         } else if (result == VerifyResult::Lockout) {
             state.visual = VisualState::ErrorLockout;
             InvalidateRect(window, nullptr, FALSE);
             SetTimer(window, 1, 1800, nullptr);
         } else {
-            // WrongPattern: flash red for 800ms then auto-reset pattern for instant retry
+            // Wrong pattern: flash red for 800ms, then reset pattern and suppress the last dot from re-starting
             state.visual = VisualState::ErrorWrong;
             InvalidateRect(window, nullptr, FALSE);
             SetTimer(window, 6, 800, nullptr);
@@ -134,42 +142,27 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         SetWindowLongPtrW(window, DWLP_USER, lp);
         SetWindowTextW(window, L"Patlock - Pattern Sign-in");
 
-        // Enable layered window style for translucent acrylic lock-screen integration
+        // Transparent layered window: TransparentKey is 100% see-through so the lock-screen wallpaper shows through
         LONG_PTR exStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
         SetWindowLongPtrW(window, GWL_EXSTYLE, exStyle | WS_EX_LAYERED);
+        SetLayeredWindowAttributes(window, TransparentKey, 0, LWA_COLORKEY);
 
-        // ~80% opacity: dark frosted glass letting blurred lock-screen wallpaper show through
-        SetLayeredWindowAttributes(window, 0, 205, LWA_ALPHA);
-
-        // Enable Windows 11 Rounded Corners and Dark Mode on window frame if supported
-        HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
-        if (dwm) {
-            auto pfnDwmSetWindowAttribute = reinterpret_cast<HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD)>(
-                GetProcAddress(dwm, "DwmSetWindowAttribute"));
-            if (pfnDwmSetWindowAttribute) {
-                BOOL darkMode = TRUE;
-                pfnDwmSetWindowAttribute(window, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &darkMode, sizeof(darkMode));
-                DWORD corner = 2 /* DWMWCP_ROUND */;
-                pfnDwmSetWindowAttribute(window, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &corner, sizeof(corner));
-            }
-            FreeLibrary(dwm);
-        }
-
-        // Center window horizontally and place it naturally below the user avatar
+        // Position window: centered horizontally, placed comfortably over the credential area
         int screenWidth = GetSystemMetrics(SM_CXSCREEN);
         int screenHeight = GetSystemMetrics(SM_CYSCREEN);
         int width = 340;
-        int height = 380;
+        int height = 390;
         int posX = (screenWidth - width) / 2;
-        int posY = (screenHeight - height) / 2 + 25;
+        int posY = (screenHeight - height) / 2 + 15;
         SetWindowPos(window, HWND_TOP, posX, posY, width, height, SWP_SHOWWINDOW);
 
-        // Record initial cursor position so accidental mouse clicks when opening the tile do not start a dot
+        // Suppress whatever dot happens to be directly under the cursor when opening
         POINT cur{};
         GetCursorPos(&cur);
         ScreenToClient(window, &cur);
-        state->initialCursor = cur;
-        state->armed = false;
+        const Layout grid = Grid(window);
+        state->suppressStartDot = DotAt(window, cur, grid.hitRadius);
+        state->pendingStartDot = -1;
 
         if (!SetTimer(window, 1, 120000, nullptr)) EndDialog(window, -1);
         return TRUE;
@@ -196,7 +189,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             return TRUE;
         }
         if (wp == 3) {
-            // Idle timeout with incomplete pattern
+            // Inactivity timeout
             KillTimer(window, 3);
             FinishPattern(window, *state);
             return TRUE;
@@ -220,9 +213,33 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             // Red flash error display finished -> reset pattern and allow instant redraw
             KillTimer(window, 6);
             if (state->visual == VisualState::ErrorWrong) {
+                POINT cur{};
+                GetCursorPos(&cur);
+                ScreenToClient(window, &cur);
+                const Layout grid = Grid(window);
+                state->suppressStartDot = DotAt(window, cur, grid.hitRadius);
                 state->pattern.Clear();
                 state->visual = VisualState::Drawing;
                 state->dragging = false;
+                state->pendingStartDot = -1;
+                InvalidateRect(window, nullptr, FALSE);
+            }
+            return TRUE;
+        }
+        if (wp == 7) {
+            // 150ms intentional hover confirmed on starting dot
+            KillTimer(window, 7);
+            if (state->pendingStartDot >= 0 && !state->dragging && state->visual == VisualState::Drawing) {
+                state->dragging = true;
+                state->pattern.Clear();
+                state->pattern.Add(static_cast<BYTE>(state->pendingStartDot));
+                state->suppressStartDot = -1;
+                state->pendingStartDot = -1;
+                POINT cur{};
+                GetCursorPos(&cur);
+                ScreenToClient(window, &cur);
+                state->previous = cur;
+                SetCapture(window);
                 InvalidateRect(window, nullptr, FALSE);
             }
             return TRUE;
@@ -230,18 +247,25 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         return TRUE;
 
     case WM_DESTROY:
-        for (UINT_PTR id = 1; id <= 6; ++id) KillTimer(window, id);
+        for (UINT_PTR id = 1; id <= 7; ++id) KillTimer(window, id);
         return TRUE;
 
     case WM_ERASEBKGND:
-        return TRUE; // Double buffer handles background painting cleanly
+        return TRUE; // Handled cleanly in WM_PAINT
 
     case WM_LBUTTONDOWN: {
         const POINT current = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-        if (state->visual != VisualState::Drawing) return TRUE;
 
-        // Arm hover immediately on click
-        state->armed = true;
+        // Check if user clicked the "Other sign-in options" button
+        RECT btnRect = SigninButtonRect(340);
+        if (PtInRect(&btnRect, current)) {
+            state->pattern.Clear();
+            ReleaseCapture();
+            EndDialog(window, IDCANCEL);
+            return TRUE;
+        }
+
+        if (state->visual != VisualState::Drawing) return TRUE;
 
         // Tapping on last dot finishes pattern if valid
         if (state->dragging && state->pattern.Valid()) {
@@ -249,7 +273,10 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             return TRUE;
         }
 
-        // Start drawing on click or tap
+        // Start drawing immediately on click
+        state->suppressStartDot = -1;
+        state->pendingStartDot = -1;
+        KillTimer(window, 7);
         state->pattern.Clear();
         state->visual = VisualState::Drawing;
         state->dragging = true;
@@ -266,35 +293,30 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         const POINT current = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         if (state->visual != VisualState::Drawing) return TRUE;
 
-        // Check if cursor has moved away from initial position before arming hover
-        if (!state->armed) {
-            const int dx = current.x - state->initialCursor.x;
-            const int dy = current.y - state->initialCursor.y;
-            if (dx * dx + dy * dy >= 144) { // moved at least 12 pixels intentionally
-                state->armed = true;
-            } else {
-                return TRUE;
-            }
+        const Layout grid = Grid(window);
+        const int dot = DotAt(window, current, grid.hitRadius);
+
+        // If cursor has moved away from the suppressed dot, clear suppression
+        if (state->suppressStartDot >= 0 && dot != state->suppressStartDot) {
+            state->suppressStartDot = -1;
         }
 
-        const Layout grid = Grid(window);
         if (!state->dragging) {
-            // Glide-to-start: hovering near any dot begins drawing immediately without clicks
-            const int dot = DotAt(window, current, grid.hitRadius);
             state->hoverDot = dot;
-            if (dot >= 0) {
-                state->dragging = true;
-                state->visual = VisualState::Drawing;
-                state->pattern.Clear();
-                state->pattern.Add(static_cast<BYTE>(dot));
-                state->previous = current;
-                SetCapture(window);
-                InvalidateRect(window, nullptr, FALSE);
+            // If hovering over a valid starting dot that isn't suppressed:
+            if (dot >= 0 && dot != state->suppressStartDot) {
+                if (state->pendingStartDot != dot) {
+                    state->pendingStartDot = dot;
+                    // Require 150ms intentional pause on the starting dot to arm hover drawing
+                    SetTimer(window, 7, 150, nullptr);
+                }
             } else {
-                InvalidateRect(window, nullptr, FALSE);
+                state->pendingStartDot = -1;
+                KillTimer(window, 7);
             }
+            InvalidateRect(window, nullptr, FALSE);
         } else {
-            state->hoverDot = DotAt(window, current, grid.hitRadius);
+            state->hoverDot = dot;
             Track(window, *state, current);
             KillTimer(window, 2);
             KillTimer(window, 3);
@@ -329,8 +351,15 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
     case WM_COMMAND:
         if (LOWORD(wp) == IDCANCEL) {
             // When Esc is pressed:
-            // If user has drawn dots or is dragging: RESET current pattern, free cursor, remain in pattern mode!
+            // If user has drawn any dots or is dragging: RESET current pattern and stay in pattern mode!
             if (state->pattern.count > 0 || state->dragging) {
+                POINT cur{};
+                GetCursorPos(&cur);
+                ScreenToClient(window, &cur);
+                const Layout grid = Grid(window);
+                state->suppressStartDot = DotAt(window, cur, grid.hitRadius);
+                state->pendingStartDot = -1;
+                KillTimer(window, 7);
                 state->pattern.Clear();
                 state->dragging = false;
                 state->visual = VisualState::Drawing;
@@ -339,7 +368,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 InvalidateRect(window, nullptr, FALSE);
                 return TRUE;
             }
-            // If pattern is already empty: close the grid and return to tile
+            // If pattern is already empty: close the grid and return to tile so user can click other sign-in options
             state->pattern.Clear();
             ReleaseCapture();
             EndDialog(window, IDCANCEL);
@@ -364,25 +393,18 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         HBITMAP memBmp = CreateCompatibleBitmap(hdc, rect.right, rect.bottom);
         HGDIOBJ oldBmp = SelectObject(dc, memBmp);
 
-        // Dark frosted acrylic background surface
-        HBRUSH bgBrush = CreateSolidBrush(RGB(18, 20, 26));
+        // 100% transparent color key background: allows the blurred lock-screen wallpaper to show through completely!
+        HBRUSH bgBrush = CreateSolidBrush(TransparentKey);
         FillRect(dc, &rect, bgBrush);
         DeleteObject(bgBrush);
         SetBkMode(dc, TRANSPARENT);
-
-        // Soft rounded acrylic border
-        HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(55, 60, 75));
-        HGDIOBJ prevBorderPen = SelectObject(dc, borderPen);
-        HGDIOBJ prevBorderBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-        RoundRect(dc, 0, 0, rect.right, rect.bottom, 22, 22);
-        SelectObject(dc, prevBorderPen);
-        SelectObject(dc, prevBorderBrush);
-        DeleteObject(borderPen);
 
         // Header typography (Segoe UI)
         HFONT titleFont = CreateFontW(-18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
         HFONT subFont = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        HFONT btnFont = CreateFontW(-12, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
         HFONT hintFont = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
@@ -390,7 +412,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         PCWSTR titleText = L"Pattern Sign-in";
         wchar_t dynamicSub[64] = L"Glide across 5+ dots to unlock";
         COLORREF titleColor = RGB(245, 246, 250);
-        COLORREF subColor = RGB(165, 172, 188);
+        COLORREF subColor = RGB(170, 178, 195);
         COLORREF lineColor = RGB(0, 180, 255);       // Electric cyan-blue
         COLORREF ringColor = RGB(0, 180, 255);
         COLORREF ringBgColor = RGB(16, 45, 80);
@@ -401,7 +423,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 StringCchPrintfW(dynamicSub, ARRAYSIZE(dynamicSub),
                     state->pattern.count < 5 ? L"%zu dots connected (min 5)" : L"%zu dots connected - pause to sign in",
                     state->pattern.count);
-                subColor = state->pattern.count < 5 ? RGB(100, 200, 255) : RGB(46, 213, 115);
+                subColor = state->pattern.count < 5 ? RGB(100, 210, 255) : RGB(46, 213, 115);
             }
         } else if (state->visual == VisualState::Success) {
             titleText = L"Pattern Verified";
@@ -442,13 +464,13 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         }
 
         // Render Title
-        RECT titleRect{0, 18, rect.right, 45};
+        RECT titleRect{0, 16, rect.right, 42};
         HGDIOBJ oldFont = SelectObject(dc, titleFont);
         SetTextColor(dc, titleColor);
         DrawTextW(dc, titleText, -1, &titleRect, DT_CENTER | DT_SINGLELINE);
 
         // Render Subtitle
-        RECT subRect{0, 48, rect.right, 72};
+        RECT subRect{0, 44, rect.right, 68};
         SelectObject(dc, subFont);
         SetTextColor(dc, subColor);
         DrawTextW(dc, dynamicSub, -1, &subRect, DT_CENTER | DT_SINGLELINE);
@@ -473,7 +495,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             }
         }
 
-        // Render 9 Grid Dots with modern layered halos
+        // Render 9 Grid Dots with dark discs that stand out crisply against the desktop lock screen wallpaper
         for (BYTE i = 0; i < 9; ++i) {
             const POINT p = Dot(grid, i);
             const bool visited = !state->hide && state->pattern.Contains(i);
@@ -514,14 +536,14 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 DeleteObject(hBrush);
                 DeleteObject(cBrush);
             } else {
-                // Unvisited Dot: dark halo + pearl center
-                HPEN uPen = CreatePen(PS_SOLID, 1, RGB(58, 64, 80));
-                HBRUSH uBrush = CreateSolidBrush(RGB(26, 30, 38));
+                // Inactive Dot: dark circular backing disc with pearl center (crisply visible on wallpaper)
+                HPEN uPen = CreatePen(PS_SOLID, 1, RGB(65, 72, 90));
+                HBRUSH uBrush = CreateSolidBrush(RGB(24, 28, 38));
                 HGDIOBJ oP = SelectObject(dc, uPen);
                 HGDIOBJ oB = SelectObject(dc, uBrush);
-                Ellipse(dc, p.x - 15, p.y - 15, p.x + 15, p.y + 15);
+                Ellipse(dc, p.x - 16, p.y - 16, p.x + 16, p.y + 16);
 
-                HBRUSH cBrush = CreateSolidBrush(RGB(185, 192, 208));
+                HBRUSH cBrush = CreateSolidBrush(RGB(210, 218, 235));
                 SelectObject(dc, cBrush);
                 Ellipse(dc, p.x - 5, p.y - 5, p.x + 5, p.y + 5);
 
@@ -533,10 +555,26 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             }
         }
 
+        // Render "Other sign-in options" button pill at bottom
+        RECT btnRect = SigninButtonRect(rect.right);
+        HPEN btnPen = CreatePen(PS_SOLID, 1, RGB(72, 80, 100));
+        HBRUSH btnBrush = CreateSolidBrush(RGB(28, 32, 44));
+        HGDIOBJ oP = SelectObject(dc, btnPen);
+        HGDIOBJ oB = SelectObject(dc, btnBrush);
+        RoundRect(dc, btnRect.left, btnRect.top, btnRect.right, btnRect.bottom, 16, 16);
+        SelectObject(dc, oP);
+        SelectObject(dc, oB);
+        DeleteObject(btnPen);
+        DeleteObject(btnBrush);
+
+        SelectObject(dc, btnFont);
+        SetTextColor(dc, RGB(235, 240, 252));
+        DrawTextW(dc, L"Other sign-in options", -1, &btnRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
         // Render Escape hint at bottom
-        RECT footerRect{0, rect.bottom - 28, rect.right, rect.bottom - 8};
+        RECT footerRect{0, rect.bottom - 24, rect.right, rect.bottom - 6};
         SelectObject(dc, hintFont);
-        SetTextColor(dc, RGB(115, 122, 140));
+        SetTextColor(dc, RGB(160, 168, 185));
         DrawTextW(dc, L"Press Esc to reset pattern", -1, &footerRect, DT_CENTER | DT_SINGLELINE);
 
         if (prevPen) SelectObject(dc, prevPen);
@@ -544,6 +582,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         SelectObject(dc, oldFont);
         DeleteObject(titleFont);
         DeleteObject(subFont);
+        DeleteObject(btnFont);
         DeleteObject(hintFont);
 
         // Blit to screen
@@ -573,7 +612,7 @@ HRESULT DrawPatternInteractive(
     // Frameless popup window
     dialog->style = WS_POPUP;
     dialog->cx = 240;
-    dialog->cy = 265;
+    dialog->cy = 275;
     State state;
     state.hide = hideTrail;
     state.verifier = verifier;
