@@ -1,0 +1,5 @@
+Windows Registry Editor Version 5.00
+
+; VM ONLY. Removes only the Microsoft sample identity used in Phase 1.
+[-HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{5fd3d285-0dd9-4362-8855-e0abaacd4af6}]
+[-HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{5fd3d285-0dd9-4362-8855-e0abaacd4af6}]

@@ -1,0 +1,11 @@
+Windows Registry Editor Version 5.00
+
+; VM ONLY, manual recovery/reference file; prefer install.ps1 with its VM checks.
+; The DLL must already be copied to the VM's System32 directory.
+; Manual registrations must also be removed manually with unregister.reg.
+[HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\{5fd3d285-0dd9-4362-8855-e0abaacd4af6}\InprocServer32]
+@="SampleV2CredentialProvider.dll"
+"ThreadingModel"="Apartment"
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{5fd3d285-0dd9-4362-8855-e0abaacd4af6}]
+@="Patlock Phase 1 Microsoft sample"

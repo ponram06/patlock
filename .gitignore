@@ -1,0 +1,28 @@
+# Visual Studio / build output
+.vs/
+x64/
+x86/
+Debug/
+Release/
+bin/
+obj/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+*.user
+*.suo
+# logs and local data
+*.log
+logs/
+# never commit secrets
+*.pfx
+*.key
+*.pem
+.env
+build/
+.superpowers/
+.pattern_unlock.json
