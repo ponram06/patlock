@@ -12,6 +12,18 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-14: Test-only CMD workflow and build-tool discovery
+- User reported `VS2022 C++ tools not found` and requested tests alone.
+- Replaced the install/reboot workflow with build/CTest only: no snapshot or
+  Password prompts, elevation, registration, enrollment, DLL replacement or reboot.
+- Discovery now inspects installed x64 compiler files across VS2022/newer
+  instances (including Build Tools/previews), pairs CMake with a supported
+  generator, and reports missing compiler/SDK/CMake components explicitly.
+- Uses an isolated build cache per generator/instance. Does not resume the old
+  install checkpoint or change the existing provider. Install scripts still
+  require the original VM/admin/snapshot safeguards.
+- Verification: PowerShell syntax and whitespace checks only. No host build or
+  executable tests; actual VM tool detection/build remains unverified.
 ### 2026-11-13: Guided CMD VM test launcher
 - Written: root RUN_VM_TEST.cmd and install/run-vm-test.ps1; VMware check before
   elevation, VS2022 CMake discovery, build/CTest gate, snapshot/Password checks,
