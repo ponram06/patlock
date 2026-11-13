@@ -16,7 +16,6 @@
 #include "CSampleCredential.h"
 #include "guid.h"
 #include "diagnostics.h"
-#include "security.h"
 
 CSampleProvider::CSampleProvider():
     _cRef(1),
@@ -250,31 +249,17 @@ HRESULT CSampleProvider::_EnumerateCredentials()
             hr = _pCredProviderUserArray->GetAt(i, &pCredUser);
             if (SUCCEEDED(hr) && pCredUser)
             {
-                PWSTR pszSid = nullptr;
-                pCredUser->GetSid(&pszSid);
-                GUID guidProvider = {};
-                pCredUser->GetProviderID(&guidProvider);
-
-                const bool isLocal = (guidProvider == Identity_LocalUserProvider);
-                const bool isEligible = isLocal && pszSid && SUCCEEDED(patlock::Eligible(pszSid));
-
-                if (pszSid) CoTaskMemFree(pszSid);
-
-                // Only enumerate Pattern tile for enrolled local users
-                if (isEligible)
+                CSampleCredential *pCredential = new(std::nothrow) CSampleCredential();
+                if (pCredential != nullptr)
                 {
-                    CSampleCredential *pCredential = new(std::nothrow) CSampleCredential();
-                    if (pCredential != nullptr)
+                    hr = pCredential->Initialize(_cpus, s_rgCredProvFieldDescriptors, s_rgFieldStatePairs, pCredUser);
+                    if (SUCCEEDED(hr))
                     {
-                        hr = pCredential->Initialize(_cpus, s_rgCredProvFieldDescriptors, s_rgFieldStatePairs, pCredUser);
-                        if (SUCCEEDED(hr))
-                        {
-                            _rgpCredentials.push_back(pCredential);
-                        }
-                        else
-                        {
-                            pCredential->Release();
-                        }
+                        _rgpCredentials.push_back(pCredential);
+                    }
+                    else
+                    {
+                        pCredential->Release();
                     }
                 }
                 pCredUser->Release();
