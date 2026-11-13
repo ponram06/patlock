@@ -1,4 +1,5 @@
 #include "pattern_window.h"
+#include "arming_gate.h"
 #include <windowsx.h>
 #include <algorithm>
 #include <cmath>
@@ -25,7 +26,7 @@ struct State {
     POINT previous{};
     PatternVerifier verifier = nullptr;
     int hoverDot = -1;
-    int suppressStartDot = -1;  // Dot under cursor suppressed from re-starting on open or reset
+    ArmingGate gate;            // a hover-start is allowed only after deliberate pointer movement
     int pendingStartDot = -1;   // Dot waiting for 150ms hover confirmation
 };
 
@@ -68,6 +69,33 @@ int DotAt(HWND window, POINT pt, int threshold) noexcept {
     return -1;
 }
 
+// Cursor position in client coordinates
+POINT CursorClient(HWND window) noexcept {
+    POINT cur{-10000, -10000};
+    if (GetCursorPos(&cur)) ScreenToClient(window, &cur);
+    return cur;
+}
+
+// The ONE place that returns the window to "waiting for a deliberate start".
+// Used on open, Esc, wrong pattern, too-short stroke, lost capture and empty strokes.
+void ResetStroke(HWND window, State& state) noexcept {
+    KillTimer(window, 2);
+    KillTimer(window, 3);
+    KillTimer(window, 5);
+    KillTimer(window, 6);
+    KillTimer(window, 7);
+    state.pattern.Clear();
+    state.dragging = false;
+    state.visual = VisualState::Drawing;
+    state.hoverDot = -1;
+    state.pendingStartDot = -1;
+    ReleaseCapture();
+    const POINT cur = CursorClient(window);
+    const Layout grid = Grid(window);
+    state.gate.Disarm(cur.x, cur.y, DotAt(window, cur, grid.hitRadius) >= 0);
+    InvalidateRect(window, nullptr, FALSE);
+}
+
 void Track(HWND window, State& state, POINT to) noexcept {
     const Layout grid = Grid(window);
     struct Hit { double t; BYTE dot; } hits[9]{};
@@ -105,6 +133,9 @@ void FinishPattern(HWND window, State& state) noexcept {
             ReleaseCapture();
             InvalidateRect(window, nullptr, FALSE);
             SetTimer(window, 5, 1200, nullptr);
+        } else {
+            // A click or movement that connected no dots must not leave a ghost stroke or mouse capture behind.
+            ResetStroke(window, state);
         }
         return;
     }
@@ -123,7 +154,7 @@ void FinishPattern(HWND window, State& state) noexcept {
             InvalidateRect(window, nullptr, FALSE);
             SetTimer(window, 1, 1800, nullptr);
         } else {
-            // Wrong pattern: flash red for 800ms, then reset pattern and suppress the last dot from re-starting
+            // Wrong pattern: flash red for 800ms, then reset pattern and disarm gate until deliberate movement
             state.visual = VisualState::ErrorWrong;
             InvalidateRect(window, nullptr, FALSE);
             SetTimer(window, 6, 800, nullptr);
@@ -157,12 +188,10 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         int posY = screenHeight / 2 + 30;
         SetWindowPos(window, HWND_TOP, posX, posY, width, height, SWP_SHOWWINDOW);
 
-        // Suppress whatever dot happens to be directly under the cursor when opening
-        POINT cur{};
-        GetCursorPos(&cur);
-        ScreenToClient(window, &cur);
+        // A dot that happens to be under the cursor must not start a stroke: pointer has to move away first
+        const POINT cur = CursorClient(window);
         const Layout grid = Grid(window);
-        state->suppressStartDot = DotAt(window, cur, grid.hitRadius);
+        state->gate.Disarm(cur.x, cur.y, DotAt(window, cur, grid.hitRadius) >= 0);
         state->pendingStartDot = -1;
 
         if (!SetTimer(window, 1, 120000, nullptr)) EndDialog(window, -1);
@@ -204,42 +233,25 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         if (wp == 5) {
             // Reset "too short" error state back to normal
             KillTimer(window, 5);
-            if (state->visual == VisualState::ErrorTooShort) {
-                state->visual = VisualState::Drawing;
-                InvalidateRect(window, nullptr, FALSE);
-            }
+            if (state->visual == VisualState::ErrorTooShort) ResetStroke(window, *state);
             return TRUE;
         }
         if (wp == 6) {
             // Red flash error display finished -> reset pattern and allow instant redraw
             KillTimer(window, 6);
-            if (state->visual == VisualState::ErrorWrong) {
-                POINT cur{};
-                GetCursorPos(&cur);
-                ScreenToClient(window, &cur);
-                const Layout grid = Grid(window);
-                state->suppressStartDot = DotAt(window, cur, grid.hitRadius);
-                state->pattern.Clear();
-                state->visual = VisualState::Drawing;
-                state->dragging = false;
-                state->pendingStartDot = -1;
-                InvalidateRect(window, nullptr, FALSE);
-            }
+            if (state->visual == VisualState::ErrorWrong) ResetStroke(window, *state);
             return TRUE;
         }
         if (wp == 7) {
             // 150ms intentional hover confirmed on starting dot
             KillTimer(window, 7);
-            if (state->pendingStartDot >= 0 && !state->dragging && state->visual == VisualState::Drawing) {
+            if (state->pendingStartDot >= 0 && !state->dragging && state->visual == VisualState::Drawing &&
+                state->gate.Armed()) {
                 state->dragging = true;
                 state->pattern.Clear();
                 state->pattern.Add(static_cast<BYTE>(state->pendingStartDot));
-                state->suppressStartDot = -1;
                 state->pendingStartDot = -1;
-                POINT cur{};
-                GetCursorPos(&cur);
-                ScreenToClient(window, &cur);
-                state->previous = cur;
+                state->previous = CursorClient(window);
                 SetCapture(window);
                 InvalidateRect(window, nullptr, FALSE);
             }
@@ -274,8 +286,11 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             return TRUE;
         }
 
-        // Start drawing immediately on click
-        state->suppressStartDot = -1;
+        // A click starts a stroke only when it lands ON a dot. Clicking empty space does nothing.
+        const Layout grid = Grid(window);
+        const int dot = DotAt(window, current, grid.hitRadius);
+        if (dot < 0) return TRUE;
+
         state->pendingStartDot = -1;
         KillTimer(window, 7);
         state->pattern.Clear();
@@ -283,9 +298,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         state->dragging = true;
         state->previous = current;
         SetCapture(window);
-        const Layout grid = Grid(window);
-        const int dot = DotAt(window, current, grid.hitRadius);
-        if (dot >= 0) state->pattern.Add(static_cast<BYTE>(dot));
+        state->pattern.Add(static_cast<BYTE>(dot));
         InvalidateRect(window, nullptr, FALSE);
         return TRUE;
     }
@@ -296,16 +309,13 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
         const Layout grid = Grid(window);
         const int dot = DotAt(window, current, grid.hitRadius);
-
-        // If cursor has moved away from the suppressed dot, clear suppression
-        if (state->suppressStartDot >= 0 && dot != state->suppressStartDot) {
-            state->suppressStartDot = -1;
-        }
+        state->gate.Observe(current.x, current.y);
 
         if (!state->dragging) {
-            state->hoverDot = dot;
-            // If hovering over a valid starting dot that isn't suppressed:
-            if (dot >= 0 && dot != state->suppressStartDot) {
+            const bool armed = state->gate.Armed();
+            state->hoverDot = armed ? dot : -1;
+            // Only a deliberate approach (armed gate) can start a stroke by hovering
+            if (armed && dot >= 0) {
                 if (state->pendingStartDot != dot) {
                     state->pendingStartDot = dot;
                     // Require 150ms intentional pause on the starting dot to arm hover drawing
@@ -342,11 +352,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
     case WM_CAPTURECHANGED:
     case WM_CANCELMODE:
-        if (state->dragging && !state->pattern.Valid()) {
-            state->dragging = false;
-            state->pattern.Clear();
-            InvalidateRect(window, nullptr, FALSE);
-        }
+        if (state->dragging && !state->pattern.Valid()) ResetStroke(window, *state);
         return TRUE;
 
     case WM_COMMAND:
@@ -354,19 +360,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             // When Esc is pressed:
             // If user has drawn any dots or is dragging: RESET current pattern and stay in pattern mode!
             if (state->pattern.count > 0 || state->dragging) {
-                POINT cur{};
-                GetCursorPos(&cur);
-                ScreenToClient(window, &cur);
-                const Layout grid = Grid(window);
-                state->suppressStartDot = DotAt(window, cur, grid.hitRadius);
-                state->pendingStartDot = -1;
-                KillTimer(window, 7);
-                state->pattern.Clear();
-                state->dragging = false;
-                state->visual = VisualState::Drawing;
-                state->hoverDot = -1;
-                ReleaseCapture();
-                InvalidateRect(window, nullptr, FALSE);
+                ResetStroke(window, *state);
                 return TRUE;
             }
             // If pattern is already empty: close the grid and return to tile so user can click other sign-in options
@@ -421,6 +415,9 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                     state->pattern.count < 5 ? L"%zu / 5 dots connected" : L"%zu dots connected - pause to sign in",
                     state->pattern.count);
                 subColor = state->pattern.count < 5 ? RGB(100, 215, 255) : RGB(46, 213, 115);
+            } else if (!state->gate.Armed()) {
+                StringCchCopyW(dynamicSub, ARRAYSIZE(dynamicSub), L"Move the pointer away, then start");
+                subColor = RGB(255, 200, 90);
             }
         } else if (state->visual == VisualState::Success) {
             StringCchCopyW(dynamicSub, ARRAYSIZE(dynamicSub), L"Signing in...");

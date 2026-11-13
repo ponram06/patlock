@@ -12,6 +12,22 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Pure-Logic ArmingGate Integration & Unit Test Suite
+- Built:
+  - `ArmingGate` (`src/common/arming_gate.h`): Pure-logic state machine deciding when a new pattern stroke may be started by hovering.
+    - If the pointer is resting on a dot at open or reset time, the gate stays disarmed until the pointer has deliberately travelled at least 40px away (`kTravelPx`).
+    - Tiny jitter on the dot never arms it.
+    - If the pointer is not on a dot at reset time, it arms immediately.
+  - Unit Test Suite (`tests/arming_tests.cpp`): Added CTest target `arming_gate` verifying disarm on open, jitter resistance, travel threshold arming, Esc reset behavior, and uninitialized gate state.
+  - Integrated `ResetStroke` in `src/common/pattern_window.cpp` as the centralized reset function across open, Esc, wrong pattern, too-short stroke, lost capture, and empty strokes.
+  - Helpful Subtitle Guidance: While `!state.gate.Armed()`, displays `"Move the pointer away, then start"` in soft amber (`RGB(255, 200, 90)`).
+- Verified in VM by user:
+  - Phase 4 unlock previously verified.
+- Not verified yet:
+  - Live VM verification of arming gate and CTest run.
+- Next step:
+  - User runs `update.cmd` in the VM to build, run tests, and test the arming gate.
+
 ### 2026-11-13: Zero-Overlap Alignment with Reference Mockup & Tile Decluttering
 - Built:
   - Zero-Overlap Placement: Positioned the transparent 280x280 pattern window at `screenHeight / 2 + 30`, cleanly below the user avatar and `testuser` username. Avatar and username are completely unobstructed.
