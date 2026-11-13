@@ -1,54 +1,134 @@
-# Trackpad Pattern Unlock for Windows (work in progress)
+# Patlock - Trackpad Pattern Sign-In for Windows
 
-An Android-style 3x3 pattern sign-in for the real Windows lock screen, drawn with the laptop trackpad.
-Planned as a Windows **Credential Provider** (C++ DLL) plus an enrollment tool and a protected credential store.
+Patlock is an Android-style 3x3 pattern sign-in for the Windows lock and sign-in screens, drawn with the laptop trackpad or mouse.
 
-Current code is a **Phase 1 Microsoft sample-provider spike**, not a working
-pattern sign-in product. The sample source, x64 CMake build and VM-only scripts
-are written but have not been compiled or tested in a VM. Start with
-[Phase 1 VM instructions](docs/PHASE1_VM.md). See [progress](docs/PROGRESS.md)
-and [the unresolved password-refresh design](docs/PASSWORD_REFRESH_DECISION.md).
-The original FINAL_REPORT.md is a planning package, not evidence of completion.
+Built as an official Windows **Credential Provider** (64-bit C++ DLL loaded by `LogonUI.exe`), Patlock integrates directly into the Windows logon architecture. When the user successfully draws the enrolled pattern, the provider retrieves the encrypted local account credential, packages a standard `KERB_INTERACTIVE_UNLOCK_LOGON` credential serialization, and hands it to Windows Local Security Authority (LSA) for real authentication.
 
-## Read in this order
-1. `FINAL_REPORT.md`: everything in ONE file (setup, plan, phases, security, tests, recovery, prompts).
-2. `docs/SETUP_GUIDE.md`: step-by-step from zero (VMware VM, tools, git, Codex).
-3. `docs/RECOVERY.md`: read before installing anything.
+---
 
-## Folder guide
-| File | Purpose |
-| --- | --- |
-| `FINAL_REPORT.md` | The complete master document |
-| `AGENTS.md` | Rules the coding agent must follow (Codex reads it automatically) |
-| `PLAN.md` | Architecture, pattern rules, storage, flaws, phases |
-| `docs/SETUP_GUIDE.md` | Environment setup and the daily workflow |
-| `docs/PHASES.md` | Phases 1 to 7 with "done when" checks |
-| `docs/SECURITY.md` | Threat model and security rules |
-| `docs/TESTING.md` | Test checklist |
-| `docs/RECOVERY.md` | How to recover if sign-in breaks |
-| `docs/PROGRESS.md` | Running log, updated after every session |
-| `prompts/START_PROMPT.md` | First prompt for Codex |
-| `prompts/PHASE_PROMPTS.md` | One prompt per phase, plus a "something broke" prompt |
-| `prototype/pattern_unlock.py` | Phase 0 Python prototype |
-| `.gitignore` | Keeps build output, logs and secrets out of git |
+## Architecture
 
-## The whole process in 12 steps
-1. Check virtualization is enabled and you have 120 GB free (SETUP_GUIDE section 1).
-2. Download the free Windows 11 ISO (install Pro, no key).
-3. Create the VMware VM: 8 GB RAM, 4 cores, 80 GB disk, TPM (save the encryption password).
-4. Install Windows with a throwaway account; install VMware Tools; create `admin2`; snapshot `clean`.
-5. In the VM install Visual Studio 2022 (Desktop development with C++), git; pause updates; snapshot `tools-ready`.
-6. On the main PC unzip this folder, `git init`, commit, push to a PRIVATE GitHub repo; `git clone` in the VM.
-7. Open the folder in Codex (newest flagship model). Paste `prompts/START_PROMPT.md` at HIGH effort.
-8. Approve the plan, then run the Phase 1 prompt at MEDIUM effort.
-9. Push, then in the VM snapshot, pull, build, register, lock, test. Paste results back to Codex.
-10. Repeat for Phases 2 to 6, snapshotting `phaseN-pass` each time. Update `docs/PROGRESS.md`.
-11. Phase 7: tune on the real trackpad with the standalone test app. Real-hardware install only with safeguards.
-12. Finish with the full `docs/TESTING.md` checklist and an honest README about limits.
+Patlock comprises four core components:
 
-## Golden rules
-- Install and register the provider ONLY in the VM (until Phase 7b).
-- The Password sign-in option must always keep working.
-- Never use your real Windows password in the VM.
-- Snapshot before every install.
-- You run the lock-screen tests; the agent cannot see your screen. Paste evidence back to it.
+1. **Credential Provider DLL (`PatlockProvider.dll`)**:
+   - Implements `ICredentialProvider` and `ICredentialProviderCredential2`.
+   - Adds a distinct "Pattern" tile to LogonUI beside the built-in Password and PIN tiles.
+   - Invokes the modal pattern-drawing dialog via LogonUI's `OnCreatingWindow` callback.
+   - Verifies pattern hashes, manages attempt counters, checks lockout delays, and packages serialized credentials.
+   - Never filters, replaces, or alters built-in Windows credential providers.
+
+2. **Pattern Window (`src/common/pattern_window.cpp`)**:
+   - Custom modal GDI-based 3x3 pattern grid dialog.
+   - Supports continuous mouse/trackpad dragging, tap-and-drag, and diagonal crossings.
+   - Implements the prototype's skipped-dot rule (e.g. crossing between unvisited opposite corner dots automatically captures the center dot).
+   - Enforces a minimum length of 5 dots.
+   - Includes optional "Hide trail" mode to resist shoulder surfing.
+
+3. **Enrollment & Password Refresh Tool (`patlock_enroll.exe`)**:
+   - Elevated desktop application run by the administrator.
+   - Validates the local account password with `LogonUserW` and extracts the account SID.
+   - Records and confirms the 3x3 pattern twice.
+   - Supports `--refresh` mode to re-verify password freshness after reboot or expiry without needing to redraw the pattern.
+
+4. **Standalone Tuning Demo (`pattern_window_demo.exe`)**:
+   - Portable desktop application that runs with zero provider installation or registry changes.
+   - Used in Phase 7 to tune trackpad feel, gesture sensitivity, and hit targets on real laptop hardware.
+
+---
+
+## Security Model and Honest Boundaries
+
+> [!IMPORTANT]
+> Patlock is a **convenience sign-in mechanism**, similar to an Android lock pattern or Windows PIN. It is **not stronger than a complex Windows password**. BitLocker or Device Encryption is a mandatory prerequisite for offline disk security.
+
+### Threat Model & Protections:
+- **Keyspace Limitation**: 3x3 pattern keyspace is relatively small (~389,000 combinations for 5-9 dots). Patlock mitigates online brute-forcing via:
+  - Minimum 5 dots required.
+  - Escalating lockout delays: 5 wrong attempts -> 30s; 6 -> 1 min; 7 -> 5 min; 8-9 -> 15 min; 10 wrong attempts permanently disables Pattern sign-in until full password re-verification.
+  - Attempt reservations are durably flushed to disk before pattern verification (a crash consumes the attempt).
+- **Dual-Mode Storage (TPM 2.0 Hardened + Baseline Fallback)**:
+  - **TPM Mode**: When a TPM is present, Patlock uses the **Microsoft Platform Crypto Provider** (`MS_PLATFORM_CRYPTO_PROVIDER`) to generate a persisted RSA-2048 key. The key's usage authorization (`PCP_USAGEAUTH` / `NCRYPT_PIN_PROPERTY`) is bound to the PBKDF2 pattern hash. The AES-256 password key is wrapped with RSA-OAEP (SHA-256). Physical TPM hardware enforces anti-hammering dictionary attack throttling.
+  - **Baseline Mode**: If no TPM is available (or in virtual machines without virtual TPM), Patlock generates a random 256-bit AES key and stores it in `HKLM\SOFTWARE\Patlock\<SID>\Record` protected by SYSTEM- and Administrators-only DACLs.
+- **Password Freshness and Boot Binding**:
+  - Freshness is bound to a volatile registry lease (`HKLM\SOFTWARE\Patlock\Boot\<SID>`).
+  - Rebooting clears volatile keys; Pattern unlock is disabled after every restart until the user signs in with Password and runs `patlock_enroll.exe --refresh`.
+  - Stored credentials expire automatically after 24 hours without password verification.
+- **Fail-Closed Execution**:
+  - Any error, corrupt record, clock rollback, or TPM fault immediately declines the tile.
+  - The built-in Password tile remains 100% available at all times.
+- **No Secrets in Logs**:
+  - Provider logging is restricted to a fixed lifecycle status string (`sample: enumeration requested`). No passwords, patterns, hashes, or user identities are ever written to disk logs.
+- **Memory Hygiene**:
+  - Sensitive buffers are wrapped in `patlock::Secret` RAII containers and wiped with `SecureZeroMemory` immediately after use.
+  - Hash and MAC comparisons are performed in constant time (`patlock::Equal`).
+
+---
+
+## Building
+
+### Prerequisites
+- Windows 11 (or Windows 10 x64)
+- Visual Studio 2022 with **Desktop development with C++** workload
+- CMake 3.24 or newer
+
+### Build with CMake
+Open an elevated **x64 Native Tools Command Prompt for VS 2022**:
+```powershell
+cd patlock
+cmake -B build -S . -A x64
+cmake --build build --config Release
+```
+
+### Run Automated Unit Tests
+```powershell
+ctest --test-dir build -C Release --output-on-failure
+```
+Verifies:
+- `pattern_rules`: 3x3 skipped-dot calculations, bounds, duplicates, and minimum length rules.
+- `crypto_policy`: PBKDF2 hashing, constant-time equality, escalating lockout intervals, memory wiping, and TPM detection.
+
+---
+
+## Installation & Testing in a Windows 11 VM
+
+All lock-screen testing should be performed inside a Windows 11 VMware Workstation Pro virtual machine.
+
+1. **Take a VM Snapshot** before installing anything.
+2. Ensure a second administrator account exists with a known password.
+3. In elevated PowerShell inside the VM:
+   ```powershell
+   .\install\install.ps1 -DllPath .\build\Release\PatlockProvider.dll -AcknowledgeVm -SnapshotAndPasswordFallbackVerified
+   ```
+4. **Enroll your local account**:
+   ```powershell
+   .\build\Release\patlock_enroll.exe
+   ```
+   Enter your local account credentials and draw your 5+ dot pattern twice.
+5. **Lock the workstation**:
+   Press `Win+L`. Select "Pattern", click "Draw pattern", draw your pattern, and submit to unlock.
+6. **Uninstall cleanly**:
+   ```powershell
+   .\install\uninstall.ps1 -AcknowledgeVm
+   ```
+
+---
+
+## Packaging
+
+To produce a self-contained distribution package:
+```powershell
+.\install\package.ps1 -Configuration Release
+```
+Outputs:
+- `dist\Patlock\`: Standalone deployment folder.
+- `dist\Patlock-Release.zip`: Compressed distribution archive.
+
+---
+
+## Recovery
+
+If sign-in is ever interrupted:
+1. Revert your VM snapshot.
+2. Or boot into Windows Safe Mode (hold Shift while clicking Restart -> Troubleshoot -> Advanced options -> Startup Settings -> Restart -> 4) and run `install\unregister.reg`.
+3. Or sign in with the backup administrator account using the standard Password tile.
+See `docs/RECOVERY.md` for complete recovery procedures.

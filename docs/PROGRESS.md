@@ -12,6 +12,20 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Phase 7 source checkpoint; trackpad tuning harness & hardware safeguards
+- Written: interactive multi-pass desktop tuning harness in `src/tools/pattern_window_demo/main.cpp`
+  with real-time dot sequence breakdown, length and validity reporting, and trail visibility toggle.
+- Line-segment intersection and hit radius tuning documented in `docs/PHASE7_VM.md`.
+- Hardware deployment safeguards, prerequisites (second admin, BitLocker key backup, restore point),
+  and Safe Mode emergency removal steps detailed for optional Step 7b.
+- Host status: written and committed. Real hardware trackpad testing and tuning remain pending user execution.
+
+### 2026-11-13: Phase 6 source checkpoint; packaging, verification matrix & documentation
+- Written: automated distribution packager `install/package.ps1` producing clean zip archives and standalone folder distributions.
+- Wrote `docs/PHASE6_VM.md` covering end-to-end VM test passes across installation, coexistence, enrollment, unlock, escalating lockout, reboot freshness, and clean uninstallation.
+- Rewrote `README.md` with full architecture documentation, security threat model, honest convenience framing, build instructions, and recovery links.
+- Host status: scripts and packaging written; runtime VM verification pending.
+
 ### 2026-11-13: Phase 5 source checkpoint; VM acceptance pending
 - Written: Platform Crypto Provider (`MS_PLATFORM_CRYPTO_PROVIDER`) integration for TPM 2.0
   RSA-2048 key storage, pattern-derived usage authorization (`PCP_USAGEAUTH` / `NCRYPT_PIN_PROPERTY`),
