@@ -12,6 +12,25 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Native COM Auto-Logon & Fix for Premature Record Disabling
+- Built:
+  - Official Windows Auto-Logon Implementation (`src/provider/CSampleProvider.cpp`, `CSampleCredential.cpp`):
+    - Implemented `ICredentialProvider::Advise` and `UnAdvise` with `ICredentialProviderEvents`.
+    - Replaced unreliable simulated keyboard input (`keybd_event` / `SendInput`) with native COM callback `CredentialsChanged(upAdviseContext)`.
+    - When a pattern is verified, `GetCredentialCount` returns `*pbAutoLogonWithDefault = TRUE` and the default tile index, instructing LogonUI to immediately invoke `GetSerialization` and log in automatically.
+    - Submit arrow also remains visible on tile as a fallback.
+  - Eliminated Premature Record Disabling (`src/common/store.cpp`):
+    - Removed `bundle.record.disabled = 1;` from `Verify()`. Verifying a pattern no longer disables the account prior to Windows authentication.
+    - In `ReportResult`: only disables if Windows actually rejects the credential (e.g. password changed).
+    - In `FinishSubmission`: resets `attempts = 0`, `until = 0`, and `disabled = 0` on successful logon.
+    - In `Check()`: removed `record.disabled` check so accounts previously disabled by an aborted simulated click immediately recover without requiring re-enrollment.
+- Verified in VM by user:
+  - Previous Phase 4 unlock verified on Windows 11 lock screen.
+- Not verified yet:
+  - Live VM verification of native COM auto-logon and unblock.
+- Next step:
+  - User runs `update.cmd` in VM and tests automatic logon.
+
 ### 2026-11-13: Adopt Option A - Drop Restart & 24h Expiration Requirements
 - Built:
   - Adopted Option A per human approval:

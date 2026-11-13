@@ -64,6 +64,8 @@ class CSampleProvider : public ICredentialProvider,
 
     IFACEMETHODIMP SetUserArray(_In_ ICredentialProviderUserArray *users);
 
+    void TriggerAutoLogon(CSampleCredential* pCred);
+
     friend HRESULT CSample_CreateInstance(_In_ REFIID riid, _Outptr_ void** ppv);
 
   protected:
@@ -82,5 +84,9 @@ private:
     bool                                    _fRecreateEnumeratedCredentials;
     CREDENTIAL_PROVIDER_USAGE_SCENARIO      _cpus;
     ICredentialProviderUserArray            *_pCredProviderUserArray;
+    ICredentialProviderEvents               *_pEvents = nullptr;
+    UINT_PTR                                _upAdviseContext = 0;
+    bool                                    _fAutoLogon = false;
+    DWORD                                   _dwAutoLogonIndex = 0;
 
 };

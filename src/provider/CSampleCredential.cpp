@@ -14,6 +14,7 @@
 #endif
 #include <unknwn.h>
 #include "CSampleCredential.h"
+#include "CSampleProvider.h"
 #include "guid.h"
 #include "pattern_window.h"
 #include "security.h"
@@ -539,23 +540,18 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID)
 
         _patternReady = true;
 
-        // Show the submit button and focus it
-        _pCredProvCredentialEvents->SetFieldState(this, SFI_SUBMIT_BUTTON, CPFS_DISPLAY_IN_SELECTED_TILE);
-        _pCredProvCredentialEvents->SetFieldInteractiveState(this, SFI_SUBMIT_BUTTON, CPFIS_FOCUSED);
+        // Make submit button visible on tile as fallback / visual confirmation
+        if (_pCredProvCredentialEvents) {
+            _pCredProvCredentialEvents->SetFieldState(this, SFI_SUBMIT_BUTTON, CPFS_DISPLAY_IN_SELECTED_TILE);
+            _pCredProvCredentialEvents->SetFieldInteractiveState(this, SFI_SUBMIT_BUTTON, CPFIS_FOCUSED);
+        }
 
-        // Auto-submit: simulate Enter key asynchronously so CommandLinkClicked returns to LogonUI first
-        std::thread([owner]() {
-            // Allow LogonUI to receive CommandLinkClicked return and focus the submit button
-            Sleep(80);
-            keybd_event(VK_RETURN, 0, 0, 0);
-            keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
-            Sleep(50);
-            HWND fg = GetForegroundWindow();
-            if (fg) {
-                PostMessageW(fg, WM_KEYDOWN, VK_RETURN, 0);
-                PostMessageW(fg, WM_KEYUP, VK_RETURN, 0);
-            }
-        }).detach();
+        // Trigger official Windows Credential Provider auto-logon via CredentialsChanged:
+        // LogonUI queries GetCredentialCount, which returns *pbAutoLogonWithDefault = TRUE,
+        // and immediately calls GetSerialization without requiring any keypresses!
+        if (_pProvider) {
+            _pProvider->TriggerAutoLogon(this);
+        }
     }
     return FAILED(hr) ? hr : S_OK;
 }
@@ -709,6 +705,7 @@ HRESULT CSampleCredential::ReportResult(NTSTATUS ntsStatus,
             patlock::FinishSubmission(_pszUserSid, _submission.data());
         } else {
             *pcpsiOptionalStatusIcon = CPSI_ERROR;
+            patlock::Disable(_pszUserSid);
             SHStrDupW(L"Windows declined the stored credential. Use Password and re-enroll Patlock. No automatic retry.", ppwszOptionalStatusText);
         }
     }

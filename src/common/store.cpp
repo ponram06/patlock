@@ -167,7 +167,7 @@ constexpr ULONGLONG kMaxPasswordAge = 0;
 
 HRESULT Check(Key& /*root*/, const Record& record) noexcept {
     const ULONGLONG now = Now();
-    if (record.disabled || record.attempts >= 10 || !record.passwordTime ||
+    if (record.attempts >= 10 || !record.passwordTime ||
         now < record.passwordTime || now < record.lastSeen ||
         (kMaxPasswordAge > 0 && now - record.passwordTime >= kMaxPasswordAge) ||
         now < record.until) {
@@ -316,9 +316,6 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* sub
         aesKey.Clear();
         if (SUCCEEDED(hr)) hr = Random(bundle.record.submission, sizeof(bundle.record.submission));
         if (FAILED(hr)) { password->Clear(); return hr; }
-        // A returned password is a one-shot submission. Failure, process death or
-        // missing ReportResult leaves the record disabled until re-enrollment.
-        bundle.record.disabled = 1;
     } else {
         aesKey.Clear();
     }
@@ -333,9 +330,9 @@ HRESULT FinishSubmission(PCWSTR sid, const BYTE submission[16]) noexcept {
     Lock lock; if (!lock.Acquire()) return E_ACCESSDENIED;
     Key root, user; HRESULT hr = OpenUser(sid, root, user); if (FAILED(hr)) return hr;
     Bundle bundle; hr = Read(user, sid, bundle); if (FAILED(hr)) return hr;
-    BYTE empty[16]{};
-    if (!bundle.record.disabled || Equal(submission, empty, 16) || !Equal(submission, bundle.record.submission, 16)) return E_ACCESSDENIED;
     bundle.record.disabled = 0;
+    bundle.record.attempts = 0;
+    bundle.record.until = 0;
     SecureZeroMemory(bundle.record.submission, sizeof(bundle.record.submission));
     return Save(user, bundle);
 }

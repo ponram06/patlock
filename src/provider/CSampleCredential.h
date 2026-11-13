@@ -24,9 +24,12 @@
 #include "resource.h"
 #include "security.h"
 
+class CSampleProvider;
+
 class CSampleCredential : public ICredentialProviderCredential2, ICredentialProviderCredentialWithFieldOptions
 {
 public:
+    void SetProvider(CSampleProvider* pProvider) { _pProvider = pProvider; }
     // IUnknown
     IFACEMETHODIMP_(ULONG) AddRef()
     {
@@ -106,6 +109,7 @@ public:
 
     static VOID CALLBACK AutoLaunchTimerCallback(HWND, UINT, UINT_PTR, DWORD);
     UINT_PTR                                _launchTimerId = 0;
+    CSampleProvider*                        _pProvider = nullptr;
     virtual ~CSampleCredential();
     long                                    _cRef;
     bool _patternReady = false;
