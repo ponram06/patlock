@@ -42,6 +42,16 @@ try {
     $copied = $true
 }
 
+# Ensure provider registration in Windows Credential Providers
+$clsid = '{21d42e91-a8c0-4e63-b5d7-372d8585982c}'
+$providerKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$clsid"
+$classKey = "HKLM:\SOFTWARE\Classes\CLSID\$clsid"
+if (-not (Test-Path -LiteralPath $providerKey) -or -not (Test-Path -LiteralPath $classKey)) {
+    Write-Host "Registering Patlock Credential Provider in Windows..." -ForegroundColor Cyan
+    $regFile = Join-Path $PSScriptRoot "register.reg"
+    Start-Process -FilePath "reg.exe" -ArgumentList "import", "`"$regFile`"" -Wait -NoNewWindow
+}
+
 # Verify deployment
 $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
 $destHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
@@ -57,12 +67,12 @@ Write-Host " SUCCESS! PatlockProvider.dll successfully updated in System32" -For
 Write-Host " Installed: $($fileInfo.FullName)" -ForegroundColor Green
 Write-Host " Timestamp: $($fileInfo.LastWriteTime)" -ForegroundColor Green
 Write-Host " SHA-256:   $destHash" -ForegroundColor Green
+Write-Host " Policy:    Option A (survives reboots, no 24h expiration)" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "Ready to test:" -ForegroundColor Yellow
-Write-Host "1. Press Win + L to lock screen." -ForegroundColor Yellow
-Write-Host "2. Select your account -> click 'Draw pattern'." -ForegroundColor Yellow
-Write-Host "3. Note the title: 'Patlock - Pattern Unlock (Glide Mode)'." -ForegroundColor Yellow
-Write-Host "4. Glide across 5+ dots: rubber-band line follows cursor." -ForegroundColor Yellow
-Write-Host "5. Pause on final dot: automatically unlocks and logs in!" -ForegroundColor Yellow
-Write-Host "   (If wrong pattern: instant error dialog is shown)." -ForegroundColor Yellow
+Write-Host "1. Press Win + L to lock screen (or restart the VM - Pattern stays active!)." -ForegroundColor Yellow
+Write-Host "2. Select your account -> click Pattern sign-in option." -ForegroundColor Yellow
+Write-Host "3. Glide across 5+ dots: rubber-band follows cursor cleanly." -ForegroundColor Yellow
+Write-Host "4. Complete pattern: instantly unlocks and logs in!" -ForegroundColor Yellow
+Write-Host "   (If you ever need to change pattern, run: build\Release\patlock_enroll.exe)" -ForegroundColor Yellow

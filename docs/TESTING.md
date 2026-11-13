@@ -30,9 +30,10 @@ Run in the Windows 11 VM first (take a snapshot before each install). Tick each 
 - [ ] After about 10 failures Pattern is disabled until explicit Patlock password verification
 - [ ] Counter clears after explicit Patlock password verification
 
-## Full-password rule
-- [ ] Pattern hidden after a restart until explicit Patlock password verification
-- [ ] Pattern hidden after the time limit without explicit Patlock password verification
+## Boot & Availability policy (Option A)
+- [ ] Pattern available immediately on lock screen AND sign-in screen after restart
+- [ ] Lockout counter and backoff timer persist durably across restarts
+- [ ] Stale password (changed in Windows) drops cleanly to built-in Password tile
 
 ## Failure handling (Password option must still work in every case)
 - [ ] Windows password changed after enrollment

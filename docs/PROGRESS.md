@@ -12,6 +12,23 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Adopt Option A - Drop Restart & 24h Expiration Requirements
+- Built:
+  - Adopted Option A per human approval:
+    - Removed volatile boot-lease check from `Check()` in `src/common/store.cpp`.
+    - Removed `PrepareBoot`, `ActivateBoot`, and `Boot` functions.
+    - Added configurable `kMaxPasswordAge = 0` (disables recurring 24h password expiration).
+    - Preserved durable attempt tracking and escalating lockout delays (30s at 5 attempts, escalating to 1m, 5m, 15m; disabled at 10 failures) stored in `HKLM\SOFTWARE\Patlock\<sid>`.
+    - Pattern unlock now persists across reboots and sign-ins seamlessly, matching Windows Hello PIN behavior.
+  - Enhanced `install/update.ps1` to ensure automatic Credential Provider registration.
+  - Updated documentation across `README.md`, `PLAN.md`, `docs/SECURITY.md`, `docs/TESTING.md`, `docs/STORAGE.md`, and `AGENTS.md`.
+- Verified in VM by user:
+  - Previous Phase 4 unlock verified on Windows 11 lock screen.
+- Not verified yet:
+  - Live VM verification of seamless post-reboot pattern unlock under Option A.
+- Next step:
+  - User runs `update.cmd` in the VM and tests unlock across reboots and lock screens.
+
 ### 2026-11-13: Pure-Logic ArmingGate Integration & Unit Test Suite
 - Built:
   - `ArmingGate` (`src/common/arming_gate.h`): Pure-logic state machine deciding when a new pattern stroke may be started by hovering.

@@ -48,10 +48,8 @@ fallback if the spike in section 11 fails, or for a later freehand mode.
 - Skipped-dot rule: passing over an unvisited dot adds it.
 - Generous hit radius (about a quarter of the cell width) because trackpad acceleration makes aiming harder.
 - Input: press-and-hold or tap-and-drag; consider a hover-style start. Optional hide-trail setting.
-- Lockout: 5 wrong -> 30 s; then 1, 5, 15 min; about 10 wrong -> Pattern disabled until full password login. Persisted across reboots.
-- Explicit full-password verification through Patlock is required after every restart and after 24 h without it.
-  Approved 2026-11-13: use the elevated desktop enrollment tool's refresh flow after signing in with the built-in Password tile.
-  Built-in Password/PIN/Hello sign-ins alone do not reset Patlock state. Never infer password use from a session event.
+- Lockout: 5 wrong -> 30 s; then 1, 5, 15 min; about 10 wrong -> Pattern disabled until full password login or re-enroll. Persisted durably across reboots.
+- Restart and freshness policy (Option A, approved 2026-11-13): The volatile boot lease requirement and 24h expiration are dropped. Pattern unlock remains available across reboots (matching Windows Hello PIN behavior). Brute-force guessing is strictly constrained by the durable escalating lockout and 10-attempt cap in locked storage. Password age is configurable via `kMaxPasswordAge` (default 0 / disabled). Stale passwords resulting from password changes are handled by one-shot failure detection and fallback to the built-in Password tile.
 
 ## 6. Secure storage
 Stored: salt + PBKDF2 hash of the pattern; encrypted password; attempt counter; lockout time; last full-password time; account name; format version.
@@ -65,7 +63,7 @@ so the TPM's anti-hammering limits guessing (same idea as Windows Hello PIN). Fa
 details need a spike (section 11).
 
 ## 7. Flaws and mitigations
-1. **Small keyspace** (~389,000 patterns for 4-9 dots; humans pick predictable ones): min 5 dots, lockout, full password after restart,
+1. **Small keyspace** (~389,000 patterns for 4-9 dots; humans pick predictable ones): min 5 dots, durable escalating lockout,
    later maybe 4x4 grid or freehand.
 2. **Recoverable stored password:** BitLocker prerequisite, locked-down storage, TPM hardening, document the trade-off.
 3. **Provider bug breaks sign-in:** VM + snapshots, second admin account, fail closed, never touch the Password tile, Safe Mode recovery.
@@ -108,7 +106,7 @@ If (1) fails: fall back to raw touchpad input in a helper process (more complex,
 
 ## 12. Recommendation
 Build it, in a VM, starting with Phase 1. Treat the pattern as quick-unlock convenience, make BitLocker a stated prerequisite,
-require the full password after restarts, enforce lockouts.
+and strictly enforce durable lockouts.
 
 ## 13. Development environment and workflow
 - Two machines: main PC (Codex, git) and a Windows 11 Pro VM in VMware Workstation Pro (build, install, test). Full steps in `docs/SETUP_GUIDE.md`.

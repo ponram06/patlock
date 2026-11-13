@@ -161,35 +161,18 @@ HRESULT Save(Key& user, Bundle& bundle) noexcept {
     return FAILED(hr) ? hr : WriteBlob(user.value, L"Record", &bundle, sizeof(bundle));
 }
 
-HRESULT Boot(Key& root, PCWSTR sid, BYTE output[16]) noexcept {
-    Key boot;
-    HRESULT hr = OpenProtected(root.value, L"Boot", boot);
-    if (FAILED(hr)) return hr;
-    return ReadBlob(boot.value, sid, output, 16);
-}
+// Option A: Drop restart requirement, retain escalating lockout and attempt limits.
+// Set kMaxPasswordAge to 0 to disable password age expiration (e.g. 30ULL * 86400 * Second).
+constexpr ULONGLONG kMaxPasswordAge = 0;
 
-HRESULT PrepareBoot(Key& root, PCWSTR sid, BYTE output[16]) noexcept {
-    HRESULT hr = Random(output, 16); if (FAILED(hr)) return hr;
-    Key boot; hr = OpenProtected(root.value, L"Boot", boot, true, true); if (FAILED(hr)) return hr;
-    // Revoke eligibility BEFORE changing a durable record. A failed flush leaves
-    // no active lease, even though RegSetValueEx made the changed record visible.
-    const LSTATUS result = RegDeleteValueW(boot.value, sid);
-    return result == ERROR_FILE_NOT_FOUND ? S_OK : HRESULT_FROM_WIN32(result);
-}
-
-HRESULT ActivateBoot(Key& root, PCWSTR sid, const BYTE value[16]) noexcept {
-    Key boot; HRESULT hr = OpenProtected(root.value, L"Boot", boot); if (FAILED(hr)) return hr;
-    // This lease is deliberately volatile and is created only AFTER record flush.
-    return HRESULT_FROM_WIN32(RegSetValueExW(boot.value, sid, 0, REG_BINARY, value, 16));
-}
-
-HRESULT Check(Key& root, const Record& record) noexcept {
-    BYTE boot[16]{};
-    HRESULT hr = Boot(root, record.sid, boot);
+HRESULT Check(Key& /*root*/, const Record& record) noexcept {
     const ULONGLONG now = Now();
-    if (FAILED(hr) || !Equal(boot, record.boot, 16) || record.disabled || record.attempts >= 10 ||
-        !record.passwordTime || now < record.passwordTime || now < record.lastSeen ||
-        now - record.passwordTime >= 86400 * Second || now < record.until) return E_ACCESSDENIED;
+    if (record.disabled || record.attempts >= 10 || !record.passwordTime ||
+        now < record.passwordTime || now < record.lastSeen ||
+        (kMaxPasswordAge > 0 && now - record.passwordTime >= kMaxPasswordAge) ||
+        now < record.until) {
+        return E_ACCESSDENIED;
+    }
     return S_OK;
 }
 
@@ -257,7 +240,7 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
         CopyMemory(aesKey.data(), bundle.key, 32);
     }
 
-    if (SUCCEEDED(hr)) hr = PrepareBoot(root, sid, bundle.record.boot);
+    if (SUCCEEDED(hr)) hr = Random(bundle.record.boot, sizeof(bundle.record.boot));
     Password password;
     if (SUCCEEDED(hr)) hr = StringCchCopyW(password.data(), password.value.size(), supplied);
     bundle.record.cipherBytes = static_cast<DWORD>((wcslen(password.data()) + 1) * sizeof(wchar_t));
@@ -267,7 +250,7 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
 
     bundle.record.passwordTime = bundle.record.lastSeen = Now();
     if (SUCCEEDED(hr)) hr = Save(user, bundle);
-    return FAILED(hr) ? hr : ActivateBoot(root, sid, bundle.record.boot);
+    return hr;
 }
 
 HRESULT Refresh(PCWSTR name, PCWSTR sid, PCWSTR supplied) noexcept {
@@ -283,11 +266,9 @@ HRESULT Refresh(PCWSTR name, PCWSTR sid, PCWSTR supplied) noexcept {
     hr = ComputePasswordMac(bundle.key, supplied, expectedMac.data());
     if (FAILED(hr) || !Equal(expectedMac.data(), bundle.record.passwordMac, 32)) return E_ACCESSDENIED;
 
-    hr = PrepareBoot(root, sid, bundle.record.boot); if (FAILED(hr)) return hr;
     bundle.record.passwordTime = bundle.record.lastSeen = Now();
     bundle.record.attempts = 0; bundle.record.until = 0;
-    hr = Save(user, bundle);
-    return FAILED(hr) ? hr : ActivateBoot(root, sid, bundle.record.boot);
+    return Save(user, bundle);
 }
 
 HRESULT Eligible(PCWSTR sid) noexcept {

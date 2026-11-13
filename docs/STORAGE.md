@@ -35,14 +35,12 @@ failure history; only explicit password verification does. Delays are 30 seconds
 eligibility until password refresh. Clock rollback relative to stored activity
 declines. Registry write/flush failure declines.
 
-Freshness is at most 24 hours and bound to a random identity in a volatile registry
-key, with a separate lease for each SID. Enrollment/refresh revoke that lease
-before changing the record, then reactivate only after the durable record flush
-succeeds. Thus a failed flush cannot leave a newly refreshed account eligible.
-A Windows restart removes that key. Only enrollment or successful explicit
-password refresh can create a fresh identity. Normal Password/PIN/Hello sign-in
-events and pattern success never refresh it. Fast Startup/hibernate semantics
-must be tested separately; these are not asserted to be equivalent to Restart.
+Availability policy (Option A, approved 2026-11-13):
+The volatile boot lease requirement has been dropped so that the Pattern tile
+remains available immediately after restart, matching Windows Hello PIN convenience.
+Brute-force protection is provided by the durable attempt counter and escalating
+delays (30s, 1m, 5m, 15m; disabled at 10 failures) stored in the protected registry record.
+Password age freshness is configurable via `kMaxPasswordAge` (set to 0 to disable).
 
 After signing in with the built-in Password tile, run in the VM:
 

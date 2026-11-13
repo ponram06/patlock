@@ -30,9 +30,7 @@ Hardened:
 - Fall back to baseline if no TPM. Document which mode is active.
 
 ## Rules for code
-- Approved password freshness flow: the elevated desktop enrollment tool
-  explicitly verifies the local account's password to refresh eligibility.
-  Built-in Password, PIN and Hello sign-ins alone do not reset Patlock state.
+- Availability across reboots & lockout (Option A): Pattern unlock remains active across reboots, matching Windows Hello PIN convenience. Durably persisted escalating lockouts (30s, 1m, 5m, 15m; disabled at 10) protect against brute-force guessing. Password freshness expiration is configurable via `kMaxPasswordAge` (default disabled). Stale passwords resulting from password changes are handled by one-shot failure detection and fallback to the built-in Password tile.
 - Never log the pattern, password, keys, salts-with-secrets, or decrypted data.
 - SecureZeroMemory all sensitive buffers right after use; avoid copying them into std::string where it can be avoided.
 - Constant-time comparison for hashes and tags.

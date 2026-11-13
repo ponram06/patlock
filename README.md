@@ -49,10 +49,10 @@ Patlock comprises four core components:
 - **Dual-Mode Storage (TPM 2.0 Hardened + Baseline Fallback)**:
   - **TPM Mode**: When a TPM is present, Patlock uses the **Microsoft Platform Crypto Provider** (`MS_PLATFORM_CRYPTO_PROVIDER`) to generate a persisted RSA-2048 key. The key's usage authorization (`PCP_USAGEAUTH` / `NCRYPT_PIN_PROPERTY`) is bound to the PBKDF2 pattern hash. The AES-256 password key is wrapped with RSA-OAEP (SHA-256). Physical TPM hardware enforces anti-hammering dictionary attack throttling.
   - **Baseline Mode**: If no TPM is available (or in virtual machines without virtual TPM), Patlock generates a random 256-bit AES key and stores it in `HKLM\SOFTWARE\Patlock\<SID>\Record` protected by SYSTEM- and Administrators-only DACLs.
-- **Password Freshness and Boot Binding**:
-  - Freshness is bound to a volatile registry lease (`HKLM\SOFTWARE\Patlock\Boot\<SID>`).
-  - Rebooting clears volatile keys; Pattern unlock is disabled after every restart until the user signs in with Password and runs `patlock_enroll.exe --refresh`.
-  - Stored credentials expire automatically after 24 hours without password verification.
+- **Boot Availability and Escalating Lockout (Option A)**:
+  - Pattern unlock remains available across reboots, matching Windows Hello PIN convenience.
+  - Brute-force attacks are constrained by durable escalating lockout (30s at 5 attempts, escalating to 1m, 5m, 15m; disabled after 10 attempts).
+  - Password expiration age is configurable via `kMaxPasswordAge` (default disabled; configurable to 30 days). Password changes are handled by one-shot failure detection and fallback to the built-in Password tile.
 - **Fail-Closed Execution**:
   - Any error, corrupt record, clock rollback, or TPM fault immediately declines the tile.
   - The built-in Password tile remains 100% available at all times.

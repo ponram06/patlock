@@ -50,7 +50,7 @@ prototype/         Phase 0 Python prototype (reference for pattern logic)
 - Verification: PBKDF2-HMAC-SHA256 with a per-user random 16-byte salt, constant-time compare.
 - Lockout: 5 wrong attempts -> 30 s, then escalating (1, 5, 15 min); after about 10, Pattern disabled until a full password login.
   Counter stored persistently (survives reboot).
-- Full password required after every restart and after 24 hours without one.
+- Availability: Pattern available across reboots (Option A, approved 2026-11-13). Lockout persists durably across reboots. Password age expiration configurable via kMaxPasswordAge (default disabled).
 
 ## Definition of done for any phase
 - Builds cleanly with no warnings you can fix.
