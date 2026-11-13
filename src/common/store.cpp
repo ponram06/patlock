@@ -13,7 +13,7 @@ constexpr ULONGLONG Second = 10000000ULL;
 
 struct Record {
     DWORD magic = 0x5041544c;
-    DWORD version = 4;
+    DWORD version = 5;
     DWORD iterations = HashIterations;
     DWORD attempts = 0;
     DWORD disabled = 0;
@@ -147,7 +147,7 @@ HRESULT Read(Key& user, PCWSTR sid, Bundle& bundle) noexcept {
     Secret<BYTE, 32> mac;
     hr = Mac(bundle, mac.data());
     Record& record = bundle.record;
-    if (FAILED(hr) || !Equal(mac.data(), bundle.mac, 32) || record.magic != 0x5041544c || record.version != 4 ||
+    if (FAILED(hr) || !Equal(mac.data(), bundle.mac, 32) || record.magic != 0x5041544c || record.version != 5 ||
         record.iterations != HashIterations || record.attempts > 10 || record.disabled > 1 ||
         record.cipherBytes < 4 || record.cipherBytes > sizeof(record.cipher) || record.cipherBytes % 2 ||
         record.tpmMode > 1 ||
@@ -200,6 +200,16 @@ HRESULT CipherWithKey(const BYTE key[32], Record& record, Password& password, bo
     return S_OK;
 }
 
+HRESULT KeyIdentity(const Record& record, wchar_t (&identity)[240]) noexcept {
+    HRESULT hr = StringCchCopyW(identity, ARRAYSIZE(identity), record.sid);
+    if (SUCCEEDED(hr)) hr = StringCchCatW(identity, ARRAYSIZE(identity), L"_");
+    for (BYTE value : record.nonce) {
+        wchar_t hex[3]{};
+        if (SUCCEEDED(hr)) hr = StringCchPrintfW(hex, ARRAYSIZE(hex), L"%02x", static_cast<unsigned>(value));
+        if (SUCCEEDED(hr)) hr = StringCchCatW(identity, ARRAYSIZE(identity), hex);
+    }
+    return hr;
+}
 HRESULT AuthenticatedIdentity(PCWSTR user, PCWSTR sid, PCWSTR password) noexcept {
     wchar_t verified[184]{};
     HRESULT hr = ValidatePassword(user, password, verified);
@@ -228,7 +238,9 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
     if (SUCCEEDED(hr) && tpm::Available()) {
         Secret<BYTE, 32> authorization;
         HRESULT tpmHr = DeriveTpmAuthorization(pattern, bundle.record.salt, authorization.data());
-        if (SUCCEEDED(tpmHr)) tpmHr = tpm::ProtectKey(sid, authorization.data(), aesKey.data(), bundle.record.tpmWrappedKey);
+        wchar_t identity[240]{};
+        if (SUCCEEDED(tpmHr)) tpmHr = KeyIdentity(bundle.record, identity);
+        if (SUCCEEDED(tpmHr)) tpmHr = tpm::ProtectKey(identity, authorization.data(), aesKey.data(), bundle.record.tpmWrappedKey);
         if (SUCCEEDED(tpmHr)) {
             bundle.record.tpmMode = 1;
         } else {
@@ -309,7 +321,9 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* sub
         // TPM authorization/anti-hammering enforcement still needs validation.
         Secret<BYTE, 32> authorization;
         hr = DeriveTpmAuthorization(pattern, bundle.record.salt, authorization.data());
-        if (SUCCEEDED(hr)) hr = tpm::UnprotectKey(sid, authorization.data(), bundle.record.tpmWrappedKey, aesKey.data());
+        wchar_t identity[240]{};
+        if (SUCCEEDED(hr)) hr = KeyIdentity(bundle.record, identity);
+        if (SUCCEEDED(hr)) hr = tpm::UnprotectKey(identity, authorization.data(), bundle.record.tpmWrappedKey, aesKey.data());
         if (FAILED(hr)) return E_ACCESSDENIED;
     } else {
         CopyMemory(aesKey.data(), bundle.key, 32);
@@ -322,6 +336,7 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* sub
         aesKey.Clear();
         if (SUCCEEDED(hr)) hr = Random(bundle.record.submission, sizeof(bundle.record.submission));
         if (FAILED(hr)) { password->Clear(); return hr; }
+        bundle.record.disabled = 1;
     } else {
         aesKey.Clear();
     }

@@ -67,14 +67,8 @@ HRESULT ProtectKey(PCWSTR sid, const BYTE authValue[32], const BYTE plainKey[32]
         &prov.h, MS_PLATFORM_CRYPTO_PROVIDER, 0);
     if (status != ERROR_SUCCESS) return HRESULT_FROM_WIN32(status);
 
-    // Delete any old key with this name
-    {
-        KeyHandle oldKey;
-        if (NCryptOpenKey(prov.h, &oldKey.h, keyName, 0, NCRYPT_MACHINE_KEY_FLAG) == ERROR_SUCCESS) {
-            NCryptDeleteKey(oldKey.h, 0);
-            oldKey.h = 0;
-        }
-    }
+    // The caller supplies a unique enrollment generation. Never destroy an
+    // existing key before the replacement credential record has been committed.
 
     KeyHandle key;
     status = NCryptCreatePersistedKey(
@@ -156,10 +150,10 @@ HRESULT DeleteKey(PCWSTR sid) noexcept {
     KeyHandle key;
     status = NCryptOpenKey(prov.h, &key.h, keyName, 0, NCRYPT_MACHINE_KEY_FLAG);
     if (status == ERROR_SUCCESS) {
-        NCryptDeleteKey(key.h, 0);
-        key.h = 0;
+        status = NCryptDeleteKey(key.h, 0);
+        if (status == ERROR_SUCCESS) key.h = 0;
     }
-    return S_OK;
+    return status == ERROR_SUCCESS ? S_OK : HRESULT_FROM_WIN32(status);
 }
 
 } // namespace tpm

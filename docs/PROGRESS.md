@@ -12,6 +12,15 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Publishing and additional hardening
+- Pushed 989205f successfully to origin/main at the user's request.
+- Written: unique TPM enrollment generations without pre-commit deletion of old
+  keys; deletion errors propagated; persisted submission disable guard restored.
+- Record version 5 requires VM re-enrollment. Old TPM keys are retained for
+  safety; cleanup and registry commit transactionality remain pending.
+- Verification: source/whitespace review only. No host build, executable tests,
+  installation or registry changes. See RELEASE_STATUS.md for release blockers.
+
 ### 2026-11-13: Current-source audit and local repairs
 - Written: disabled-record enforcement, optional ReportResult output handling,
   completion-token checks, separate TPM authorization derivation (record v4),
