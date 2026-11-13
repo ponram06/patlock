@@ -217,6 +217,7 @@ HRESULT CSampleCredential::SetSelected(_Out_ BOOL *pbAutoLogon)
 HRESULT CSampleCredential::SetDeselected()
 {
     _patternReady = false;
+    _pattern.Clear();
     HRESULT hr = S_OK;
     if (_rgFieldStrings[SFI_PASSWORD])
     {
@@ -317,7 +318,7 @@ HRESULT CSampleCredential::GetSubmitButtonValue(DWORD dwFieldID, _Out_ DWORD *pd
     {
         // pdwAdjacentTo is a pointer to the fieldID you want the submit button to
         // appear next to.
-        *pdwAdjacentTo = SFI_PASSWORD;
+        *pdwAdjacentTo = SFI_LAUNCHWINDOW_LINK;
         hr = S_OK;
     }
     else
@@ -468,12 +469,17 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID)
     HWND owner = nullptr;
     HRESULT hr = _pCredProvCredentialEvents->OnCreatingWindow(&owner);
     if (FAILED(hr) || !owner) return E_FAIL;
-    patlock::Pattern pattern;
-    hr = patlock::DrawPattern(HINST_THISDLL, owner, _fChecked != FALSE, pattern);
-    if (hr == S_OK) hr = patlock::Verify(_pszUserSid, pattern);
-    pattern.Clear();
-    if (hr == S_OK) MessageBoxW(owner, L"Pattern verified. Windows authentication is not enabled in this phase.", L"Pattern", MB_OK);
-    else if (FAILED(hr)) MessageBoxW(owner, L"Pattern declined. Wait for any lockout, or sign in with Password and run Patlock password refresh.", L"Pattern", MB_OK | MB_ICONWARNING);
+    _pattern.Clear();
+    if (!_fIsLocalUser || FAILED(patlock::Eligible(_pszUserSid))) {
+        MessageBoxW(owner, L"Pattern unavailable. Use Password, then run Patlock password refresh or re-enroll.", L"Pattern", MB_OK | MB_ICONWARNING);
+        return S_OK;
+    }
+    hr = patlock::DrawPattern(HINST_THISDLL, owner, _fChecked != FALSE, _pattern);
+    if (hr == S_OK) {
+        _patternReady = true;
+        hr = _pCredProvCredentialEvents->SetFieldState(this, SFI_SUBMIT_BUTTON, CPFS_DISPLAY_IN_SELECTED_TILE);
+        if (FAILED(hr)) { _patternReady = false; _pattern.Clear(); }
+    }
     return FAILED(hr) ? hr : S_OK;
 }
 
@@ -493,6 +499,22 @@ HRESULT CSampleCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIAL
     // A captured pattern alone is never a credential.
     if (!_patternReady) return S_OK;
     _patternReady = false;
+    patlock::Password password;
+    hr = _fIsLocalUser ? patlock::Verify(_pszUserSid, _pattern, &password, _submission.data()) : E_ACCESSDENIED;
+    _pattern.Clear();
+    if (FAILED(hr)) {
+        *pcpsiOptionalStatusIcon = CPSI_WARNING;
+        SHStrDupW(L"Pattern declined. Wait for lockout or use Password and refresh Patlock.", ppwszOptionalStatusText);
+        return S_OK;
+    }
+    _awaitingResult = true;
+    if (_rgFieldStrings[SFI_PASSWORD]) {
+        SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], (wcslen(_rgFieldStrings[SFI_PASSWORD]) + 1) * sizeof(wchar_t));
+        CoTaskMemFree(_rgFieldStrings[SFI_PASSWORD]); _rgFieldStrings[SFI_PASSWORD] = nullptr;
+    }
+    hr = SHStrDupW(password.data(), &_rgFieldStrings[SFI_PASSWORD]);
+    password.Clear();
+    if (FAILED(hr)) return hr;
 
     // For local user, the domain and user name can be split from _pszQualifiedUserName (domain\username).
     // CredPackAuthenticationBuffer() cannot be used because it won't work with unlock scenario.
@@ -606,63 +628,24 @@ HRESULT CSampleCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIAL
     return hr;
 }
 
-struct REPORT_RESULT_STATUS_INFO
-{
-    NTSTATUS ntsStatus;
-    NTSTATUS ntsSubstatus;
-    PWSTR     pwzMessage;
-    CREDENTIAL_PROVIDER_STATUS_ICON cpsi;
-};
-
-static const REPORT_RESULT_STATUS_INFO s_rgLogonStatusInfo[] =
-{
-    { STATUS_LOGON_FAILURE, STATUS_SUCCESS, L"Incorrect password or username.", CPSI_ERROR, },
-    { STATUS_ACCOUNT_RESTRICTION, STATUS_ACCOUNT_DISABLED, L"The account is disabled.", CPSI_WARNING },
-};
-
-// ReportResult is completely optional.  Its purpose is to allow a credential to customize the string
-// and the icon displayed in the case of a logon failure.  For example, we have chosen to
-// customize the error shown in the case of bad username/password and in the case of the account
-// being disabled.
+// Only Windows' result for our one-shot credential may clear the submission guard.
 HRESULT CSampleCredential::ReportResult(NTSTATUS ntsStatus,
                                         NTSTATUS ntsSubstatus,
                                         _Outptr_result_maybenull_ PWSTR *ppwszOptionalStatusText,
                                         _Out_ CREDENTIAL_PROVIDER_STATUS_ICON *pcpsiOptionalStatusIcon)
 {
-    *ppwszOptionalStatusText = nullptr;
-    *pcpsiOptionalStatusIcon = CPSI_NONE;
-
-    DWORD dwStatusInfo = (DWORD)-1;
-
-    // Look for a match on status and substatus.
-    for (DWORD i = 0; i < ARRAYSIZE(s_rgLogonStatusInfo); i++)
-    {
-        if (s_rgLogonStatusInfo[i].ntsStatus == ntsStatus && s_rgLogonStatusInfo[i].ntsSubstatus == ntsSubstatus)
-        {
-            dwStatusInfo = i;
-            break;
+    if (!ppwszOptionalStatusText || !pcpsiOptionalStatusIcon) return E_POINTER;
+    *ppwszOptionalStatusText = nullptr; *pcpsiOptionalStatusIcon = CPSI_NONE;
+    if (_awaitingResult) {
+        if (ntsStatus == STATUS_SUCCESS && ntsSubstatus == STATUS_SUCCESS) {
+            patlock::FinishSubmission(_pszUserSid, _submission.data());
+        } else {
+            *pcpsiOptionalStatusIcon = CPSI_ERROR;
+            SHStrDupW(L"Windows declined the stored credential. Use Password and re-enroll Patlock. No automatic retry.", ppwszOptionalStatusText);
         }
     }
-
-    if ((DWORD)-1 != dwStatusInfo)
-    {
-        if (SUCCEEDED(SHStrDupW(s_rgLogonStatusInfo[dwStatusInfo].pwzMessage, ppwszOptionalStatusText)))
-        {
-            *pcpsiOptionalStatusIcon = s_rgLogonStatusInfo[dwStatusInfo].cpsi;
-        }
-    }
-
-    // If we failed the logon, try to erase the password field.
-    if (FAILED(HRESULT_FROM_NT(ntsStatus)))
-    {
-        if (_pCredProvCredentialEvents)
-        {
-            _pCredProvCredentialEvents->SetFieldString(this, SFI_PASSWORD, L"");
-        }
-    }
-
-    // Since nullptr is a valid value for *ppwszOptionalStatusText and *pcpsiOptionalStatusIcon
-    // this function can't fail.
+    _awaitingResult = false; _submission.Clear(); _pattern.Clear(); _patternReady = false;
+    if (_rgFieldStrings[SFI_PASSWORD]) SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], (wcslen(_rgFieldStrings[SFI_PASSWORD]) + 1) * sizeof(wchar_t));
     return S_OK;
 }
 

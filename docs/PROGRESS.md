@@ -12,6 +12,15 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Phase 4 source checkpoint; VM acceptance pending
+- Written: pattern-to-password verification at submit time, local-account sample
+  serialization, immediate plaintext cleanup and a persisted one-shot submission
+  guard tied to ReportResult. Draw then submit; no automatic retry.
+- Record version is now 2; pre-Phase-4 records require re-enrollment.
+- Wrote PHASE4_VM.md covering unlock/sign-in, repeat success, stale passwords,
+  crash/no-callback handling and fallback. None has been executed.
+- In particular, successful ReportResult delivery on the target Windows build
+  must be verified before claiming repeat Pattern unlock works.
 ### 2026-11-13: Phase 3 source checkpoint; VM acceptance pending
 - Written: native C++ elevated enrollment and password-refresh tool; local-account
   validation, double drawing, PBKDF2-HMAC-SHA256, SID-bound AES-GCM records,

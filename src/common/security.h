@@ -21,7 +21,8 @@ HRESULT HashPattern(const Pattern& pattern, const BYTE salt[16], BYTE hash[32]) 
 HRESULT ValidatePassword(PCWSTR user, PCWSTR password, wchar_t (&sid)[184]) noexcept;
 HRESULT Enroll(PCWSTR user, PCWSTR sid, PCWSTR password, const Pattern& pattern) noexcept;
 HRESULT Refresh(PCWSTR user, PCWSTR sid, PCWSTR password) noexcept;
-HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password = nullptr) noexcept;
+HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password = nullptr, BYTE* submission = nullptr) noexcept;
+HRESULT FinishSubmission(PCWSTR sid, const BYTE submission[16]) noexcept;
 HRESULT Disable(PCWSTR sid) noexcept;
 HRESULT Eligible(PCWSTR sid) noexcept;
 // Pure policy helpers, also used by VM tests. Seconds and failure counts only.

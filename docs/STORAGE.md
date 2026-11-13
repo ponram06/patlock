@@ -13,7 +13,7 @@ No account name, password or pattern is accepted on the command line.
 Each SID has one REG_BINARY record under the 64-bit HKLM\SOFTWARE\Patlock key.
 Root and account keys use a protected DACL granting only SYSTEM and Administrators
 full access. Opening a key reapplies that DACL before reading a secret. The
-version-1 record contains a random 256-bit key, account identity, PBKDF2 salt and
+version-2 record contains a random 256-bit key, account identity, PBKDF2 salt and
 hash, AES-GCM ciphertext/nonce/tag, attempt state, freshness and an HMAC over the
 record. It is a fixed C++ layout for this build, not a general interchange format.
 Unknown size/version, invalid bounds, changed SID or bad MAC decline the tile.

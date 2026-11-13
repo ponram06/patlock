@@ -55,7 +55,7 @@ static const FIELD_STATE_PAIR s_rgFieldStatePairs[] =
     { CPFS_HIDDEN,                     CPFIS_NONE    },    // SFI_LABEL
     { CPFS_DISPLAY_IN_BOTH,            CPFIS_NONE    },    // SFI_LARGE_TEXT
     { CPFS_HIDDEN,                     CPFIS_NONE    },    // SFI_PASSWORD
-    { CPFS_HIDDEN,                     CPFIS_NONE    },    // SFI_SUBMIT_BUTTON
+    { CPFS_DISPLAY_IN_SELECTED_TILE,   CPFIS_NONE    },    // SFI_SUBMIT_BUTTON
     { CPFS_DISPLAY_IN_SELECTED_TILE,   CPFIS_NONE    },    // SFI_LAUNCHWINDOW_LINK
     { CPFS_HIDDEN,                     CPFIS_NONE    },    // SFI_HIDECONTROLS_LINK
     { CPFS_HIDDEN,                     CPFIS_NONE    },    // SFI_FULLNAME_TEXT

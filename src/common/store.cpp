@@ -11,7 +11,7 @@ constexpr PCWSTR Access = L"D:P(A;;KA;;;SY)(A;;KA;;;BA)";
 constexpr ULONGLONG Second = 10000000ULL;
 struct Record {
     DWORD magic = 0x5041544c;
-    DWORD version = 1;
+    DWORD version = 2;
     DWORD iterations = HashIterations;
     DWORD attempts = 0;
     DWORD disabled = 0;
@@ -20,6 +20,7 @@ struct Record {
     ULONGLONG passwordTime = 0;
     ULONGLONG lastSeen = 0;
     BYTE boot[16]{};
+    BYTE submission[16]{};
     BYTE salt[16]{};
     BYTE hash[32]{};
     wchar_t user[256]{};
@@ -113,7 +114,7 @@ HRESULT Read(Key& user, PCWSTR sid, Bundle& bundle) noexcept {
     Secret<BYTE, 32> mac;
     hr = Mac(bundle, mac.data());
     Record& record = bundle.record;
-    if (FAILED(hr) || !Equal(mac.data(), bundle.mac, 32) || record.magic != 0x5041544c || record.version != 1 ||
+    if (FAILED(hr) || !Equal(mac.data(), bundle.mac, 32) || record.magic != 0x5041544c || record.version != 2 ||
         record.iterations != HashIterations || record.attempts > 10 || record.disabled > 1 ||
         record.cipherBytes < 4 || record.cipherBytes > sizeof(record.cipher) || record.cipherBytes % 2 ||
         wcsnlen_s(record.user, ARRAYSIZE(record.user)) >= ARRAYSIZE(record.user) || !record.user[0] ||
@@ -227,8 +228,10 @@ HRESULT Eligible(PCWSTR sid) noexcept {
     Bundle bundle; hr = Read(user, sid, bundle);
     return FAILED(hr) ? hr : Check(root, bundle.record);
 }
-HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password) noexcept {
+HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* submission) noexcept {
     if (password) password->Clear();
+    if (submission) SecureZeroMemory(submission, 16);
+    if (password && !submission) return E_INVALIDARG;
     if (!pattern.Valid()) return E_INVALIDARG;
     Lock lock; if (!lock.Acquire()) return E_ACCESSDENIED;
     Key root, user; HRESULT hr = OpenUser(sid, root, user); if (FAILED(hr)) return hr;
@@ -244,9 +247,28 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password) noexcept 
     hr = HashPattern(pattern, bundle.record.salt, hash.data());
     if (FAILED(hr) || !Equal(hash.data(), bundle.record.hash, 32)) return E_ACCESSDENIED;
     bundle.record.attempts = attempts; bundle.record.until = until;
-    hr = Save(user, bundle); if (FAILED(hr)) return hr;
-    if (password) hr = Cipher(bundle, *password, false);
+    if (password) {
+        hr = Cipher(bundle, *password, false);
+        if (SUCCEEDED(hr)) hr = Random(bundle.record.submission, sizeof(bundle.record.submission));
+        if (FAILED(hr)) { password->Clear(); return hr; }
+        // A returned password is a one-shot submission. Failure, process death or
+        // missing ReportResult leaves the record disabled until re-enrollment.
+        bundle.record.disabled = 1;
+    }
+    hr = Save(user, bundle);
+    if (FAILED(hr)) { if (password) password->Clear(); return hr; }
+    if (password) CopyMemory(submission, bundle.record.submission, 16);
     return hr;
+}
+HRESULT FinishSubmission(PCWSTR sid, const BYTE submission[16]) noexcept {
+    Lock lock; if (!lock.Acquire()) return E_ACCESSDENIED;
+    Key root, user; HRESULT hr = OpenUser(sid, root, user); if (FAILED(hr)) return hr;
+    Bundle bundle; hr = Read(user, sid, bundle); if (FAILED(hr)) return hr;
+    BYTE empty[16]{};
+    if (!bundle.record.disabled || Equal(submission, empty, 16) || !Equal(submission, bundle.record.submission, 16)) return E_ACCESSDENIED;
+    bundle.record.disabled = 0;
+    SecureZeroMemory(bundle.record.submission, sizeof(bundle.record.submission));
+    return Save(user, bundle);
 }
 HRESULT Disable(PCWSTR sid) noexcept {
     Lock lock; if (!lock.Acquire()) return E_ACCESSDENIED;
