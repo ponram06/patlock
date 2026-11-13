@@ -42,8 +42,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
     if (SUCCEEDED(hr)) {
         const bool isTpm = (patlock::QueryTpmMode(sid) == S_OK);
         const wchar_t* modeMsg = isTpm
-            ? L"Saved in TPM-hardened mode (Platform Crypto Provider).\nPassword verification is valid for this boot and up to 24 hours."
-            : L"Saved in baseline mode (software store).\nPassword verification is valid for this boot and up to 24 hours.";
+            ? L"Enrolled successfully in TPM-hardened mode (Platform Crypto Provider).\nPattern unlock is active and persists across reboots."
+            : L"Enrolled successfully in baseline mode (software store).\nPattern unlock is active and persists across reboots.";
         MessageBoxW(nullptr, modeMsg, L"Patlock", MB_OK | MB_ICONINFORMATION);
     } else {
         wchar_t errorMsg[512];
