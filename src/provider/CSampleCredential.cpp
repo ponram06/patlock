@@ -478,7 +478,17 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID)
     if (hr == S_OK) {
         _patternReady = true;
         hr = _pCredProvCredentialEvents->SetFieldState(this, SFI_SUBMIT_BUTTON, CPFS_DISPLAY_IN_SELECTED_TILE);
-        if (FAILED(hr)) { _patternReady = false; _pattern.Clear(); }
+        if (SUCCEEDED(hr)) {
+            // Automatically submit credentials upon drawing pattern (Android-style auto-login)
+            // without requiring the user to manually click the submit arrow button.
+            keybd_event(VK_RETURN, 0, 0, 0);
+            keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
+            PostMessageW(owner, WM_KEYDOWN, VK_RETURN, 0);
+            PostMessageW(owner, WM_KEYUP, VK_RETURN, 0);
+        } else {
+            _patternReady = false;
+            _pattern.Clear();
+        }
     }
     return FAILED(hr) ? hr : S_OK;
 }
