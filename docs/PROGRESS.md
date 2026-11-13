@@ -12,6 +12,23 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Reference Mockup Visual Redesign & Lockout Auto-Recovery
+- Built:
+  - Exact Visual Match with User Reference Mockup (`src/common/pattern_window.cpp`):
+    - Removed the black card container and borders; entire window is 100% see-through with `LWA_COLORKEY` so lock screen wallpaper shows cleanly through everywhere.
+    - Adjusted vertical positioning to `screenHeight / 2 + 45`, ensuring avatar and `testuser` remain completely clear and unobstructed above.
+    - Rendered 9 solid dark slate floating discs (`RGB(22, 26, 35)`) directly on the wallpaper with 64px spacing and pearl centers.
+    - Added dedicated `"Other sign-in options"` text link directly below the grid with `IDC_HAND` cursor. Clicking it immediately closes the pattern window and returns to Windows sign-in options.
+  - Lockout Auto-Recovery & Brute-force Safety (`src/common/store.cpp`):
+    - A correct pattern match now explicitly resets the durable failure counter (`attempts = 0`, `until = 0`).
+    - Removed permanent bricking in `Check()`: lockout backoff (`now < record.until`) is strictly enforced (30s, 1m, 5m, 15m), but once the timer passes, entering the correct pattern resets attempts and logs in cleanly.
+- Verified in VM by user:
+  - Phase 4 unlock verified.
+- Not verified yet:
+  - Live VM verification of mockup visual match and sign-in options link.
+- Next step:
+  - User runs `update.cmd` in VM and tests lock screen.
+
 ### 2026-11-13: Native COM Auto-Logon & Fix for Premature Record Disabling
 - Built:
   - Official Windows Auto-Logon Implementation (`src/provider/CSampleProvider.cpp`, `CSampleCredential.cpp`):

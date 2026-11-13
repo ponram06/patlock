@@ -310,7 +310,8 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* sub
         CopyMemory(aesKey.data(), bundle.key, 32);
     }
 
-    bundle.record.attempts = attempts; bundle.record.until = until;
+    // Pattern matched successfully! Reset failure counter and lockout timer.
+    bundle.record.attempts = 0; bundle.record.until = 0;
     if (password) {
         hr = CipherWithKey(aesKey.data(), bundle.record, *password, false);
         aesKey.Clear();
