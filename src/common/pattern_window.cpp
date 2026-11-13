@@ -38,19 +38,19 @@ struct Layout {
 };
 
 RECT SigninButtonRect(int windowWidth) noexcept {
-    const int btnWidth = 200;
+    const int btnWidth = 176;
     const int left = (windowWidth - btnWidth) / 2;
-    return {left, 326, left + btnWidth, 358};
+    return {left, 222, left + btnWidth, 248};
 }
 
 Layout Grid(HWND window) noexcept {
     RECT r{};
     GetClientRect(window, &r);
     const int availableWidth = static_cast<int>(r.right);
-    const int spacing = 82;
+    const int spacing = 68;
     const int startX = availableWidth / 2 - spacing;
-    const int startY = 96;
-    return {startX, startY, spacing, 14, 30};
+    const int startY = 44;
+    return {startX, startY, spacing, 14, 28};
 }
 
 POINT Dot(Layout grid, int dot) noexcept {
@@ -147,13 +147,14 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         SetWindowLongPtrW(window, GWL_EXSTYLE, exStyle | WS_EX_LAYERED);
         SetLayeredWindowAttributes(window, TransparentKey, 0, LWA_COLORKEY);
 
-        // Position window: centered horizontally, placed comfortably over the credential area
+        // Position window: centered horizontally, placed cleanly below username 'testuser' without any overlap!
         int screenWidth = GetSystemMetrics(SM_CXSCREEN);
         int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-        int width = 340;
-        int height = 390;
+        int width = 280;
+        int height = 280;
         int posX = (screenWidth - width) / 2;
-        int posY = (screenHeight - height) / 2 + 15;
+        // Positioned 30px below screen center to avoid covering avatar or username
+        int posY = screenHeight / 2 + 30;
         SetWindowPos(window, HWND_TOP, posX, posY, width, height, SWP_SHOWWINDOW);
 
         // Suppress whatever dot happens to be directly under the cursor when opening
@@ -257,7 +258,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         const POINT current = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
 
         // Check if user clicked the "Other sign-in options" button
-        RECT btnRect = SigninButtonRect(340);
+        RECT btnRect = SigninButtonRect(280);
         if (PtInRect(&btnRect, current)) {
             state->pattern.Clear();
             ReleaseCapture();
@@ -399,9 +400,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         DeleteObject(bgBrush);
         SetBkMode(dc, TRANSPARENT);
 
-        // Header typography (Segoe UI)
-        HFONT titleFont = CreateFontW(-18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        // Clean typography (Segoe UI)
         HFONT subFont = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
         HFONT btnFont = CreateFontW(-12, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
@@ -409,10 +408,8 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         HFONT hintFont = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
 
-        PCWSTR titleText = L"Pattern Sign-in";
-        wchar_t dynamicSub[64] = L"Glide across 5+ dots to unlock";
-        COLORREF titleColor = RGB(245, 246, 250);
-        COLORREF subColor = RGB(170, 178, 195);
+        wchar_t dynamicSub[64] = L"Glide across dots to unlock";
+        COLORREF subColor = RGB(175, 185, 200);
         COLORREF lineColor = RGB(0, 180, 255);       // Electric cyan-blue
         COLORREF ringColor = RGB(0, 180, 255);
         COLORREF ringBgColor = RGB(16, 45, 80);
@@ -421,57 +418,43 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         if (state->visual == VisualState::Drawing) {
             if (state->pattern.count > 0) {
                 StringCchPrintfW(dynamicSub, ARRAYSIZE(dynamicSub),
-                    state->pattern.count < 5 ? L"%zu dots connected (min 5)" : L"%zu dots connected - pause to sign in",
+                    state->pattern.count < 5 ? L"%zu / 5 dots connected" : L"%zu dots connected - pause to sign in",
                     state->pattern.count);
-                subColor = state->pattern.count < 5 ? RGB(100, 210, 255) : RGB(46, 213, 115);
+                subColor = state->pattern.count < 5 ? RGB(100, 215, 255) : RGB(46, 213, 115);
             }
         } else if (state->visual == VisualState::Success) {
-            titleText = L"Pattern Verified";
             StringCchCopyW(dynamicSub, ARRAYSIZE(dynamicSub), L"Signing in...");
-            titleColor = RGB(46, 213, 115);        // Emerald green
-            subColor = RGB(160, 235, 190);
+            subColor = RGB(46, 213, 115);            // Emerald green
             lineColor = RGB(46, 213, 115);
             ringColor = RGB(46, 213, 115);
             ringBgColor = RGB(20, 60, 35);
             coreColor = RGB(230, 255, 235);
         } else if (state->visual == VisualState::ErrorWrong) {
-            titleText = L"Incorrect Pattern";
-            StringCchCopyW(dynamicSub, ARRAYSIZE(dynamicSub), L"Please try again");
-            titleColor = RGB(255, 75, 75);         // Vivid coral-red
-            subColor = RGB(255, 175, 175);
+            StringCchCopyW(dynamicSub, ARRAYSIZE(dynamicSub), L"Incorrect pattern");
+            subColor = RGB(255, 85, 85);             // Vivid coral-red
             lineColor = RGB(255, 75, 75);
             ringColor = RGB(255, 75, 75);
             ringBgColor = RGB(70, 22, 28);
             coreColor = RGB(255, 225, 230);
         } else if (state->visual == VisualState::ErrorTooShort) {
-            titleText = L"Pattern Too Short";
             StringCchCopyW(dynamicSub, ARRAYSIZE(dynamicSub), L"Connect at least 5 dots");
-            titleColor = RGB(255, 75, 75);
-            subColor = RGB(255, 175, 175);
+            subColor = RGB(255, 85, 85);
             lineColor = RGB(255, 75, 75);
             ringColor = RGB(255, 75, 75);
             ringBgColor = RGB(70, 22, 28);
             coreColor = RGB(255, 225, 230);
         } else if (state->visual == VisualState::ErrorLockout) {
-            titleText = L"Pattern Locked Out";
-            StringCchCopyW(dynamicSub, ARRAYSIZE(dynamicSub), L"Too many attempts. Use Password.");
-            titleColor = RGB(255, 75, 75);
-            subColor = RGB(255, 175, 175);
+            StringCchCopyW(dynamicSub, ARRAYSIZE(dynamicSub), L"Locked out. Use Password.");
+            subColor = RGB(255, 85, 85);
             lineColor = RGB(255, 75, 75);
             ringColor = RGB(255, 75, 75);
             ringBgColor = RGB(70, 22, 28);
             coreColor = RGB(255, 225, 230);
         }
 
-        // Render Title
-        RECT titleRect{0, 16, rect.right, 42};
-        HGDIOBJ oldFont = SelectObject(dc, titleFont);
-        SetTextColor(dc, titleColor);
-        DrawTextW(dc, titleText, -1, &titleRect, DT_CENTER | DT_SINGLELINE);
-
-        // Render Subtitle
-        RECT subRect{0, 44, rect.right, 68};
-        SelectObject(dc, subFont);
+        // Render Subtitle cleanly right above dots
+        RECT subRect{0, 10, rect.right, 32};
+        HGDIOBJ oldFont = SelectObject(dc, subFont);
         SetTextColor(dc, subColor);
         DrawTextW(dc, dynamicSub, -1, &subRect, DT_CENTER | DT_SINGLELINE);
 
@@ -495,7 +478,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             }
         }
 
-        // Render 9 Grid Dots with dark discs that stand out crisply against the desktop lock screen wallpaper
+        // Render 9 Grid Dots: dark circular discs matching user's reference mockup
         for (BYTE i = 0; i < 9; ++i) {
             const POINT p = Dot(grid, i);
             const bool visited = !state->hide && state->pattern.Contains(i);
@@ -507,11 +490,11 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 HBRUSH vBrush = CreateSolidBrush(ringBgColor);
                 HGDIOBJ oP = SelectObject(dc, vPen);
                 HGDIOBJ oB = SelectObject(dc, vBrush);
-                Ellipse(dc, p.x - 20, p.y - 20, p.x + 20, p.y + 20);
+                Ellipse(dc, p.x - 18, p.y - 18, p.x + 18, p.y + 18);
 
                 HBRUSH cBrush = CreateSolidBrush(coreColor);
                 SelectObject(dc, cBrush);
-                Ellipse(dc, p.x - 7, p.y - 7, p.x + 7, p.y + 7);
+                Ellipse(dc, p.x - 6, p.y - 6, p.x + 6, p.y + 6);
 
                 SelectObject(dc, oP);
                 SelectObject(dc, oB);
@@ -524,11 +507,11 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 HBRUSH hBrush = CreateSolidBrush(RGB(18, 48, 82));
                 HGDIOBJ oP = SelectObject(dc, hPen);
                 HGDIOBJ oB = SelectObject(dc, hBrush);
-                Ellipse(dc, p.x - 18, p.y - 18, p.x + 18, p.y + 18);
+                Ellipse(dc, p.x - 16, p.y - 16, p.x + 16, p.y + 16);
 
                 HBRUSH cBrush = CreateSolidBrush(RGB(220, 240, 255));
                 SelectObject(dc, cBrush);
-                Ellipse(dc, p.x - 6, p.y - 6, p.x + 6, p.y + 6);
+                Ellipse(dc, p.x - 5, p.y - 5, p.x + 5, p.y + 5);
 
                 SelectObject(dc, oP);
                 SelectObject(dc, oB);
@@ -536,16 +519,16 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 DeleteObject(hBrush);
                 DeleteObject(cBrush);
             } else {
-                // Inactive Dot: dark circular backing disc with pearl center (crisply visible on wallpaper)
-                HPEN uPen = CreatePen(PS_SOLID, 1, RGB(65, 72, 90));
-                HBRUSH uBrush = CreateSolidBrush(RGB(24, 28, 38));
+                // Inactive Dot: dark circular backing disc (stands out crisply against desktop lock screen wallpaper)
+                HPEN uPen = CreatePen(PS_SOLID, 1, RGB(70, 78, 96));
+                HBRUSH uBrush = CreateSolidBrush(RGB(44, 48, 60));
                 HGDIOBJ oP = SelectObject(dc, uPen);
                 HGDIOBJ oB = SelectObject(dc, uBrush);
-                Ellipse(dc, p.x - 16, p.y - 16, p.x + 16, p.y + 16);
+                Ellipse(dc, p.x - 14, p.y - 14, p.x + 14, p.y + 14);
 
                 HBRUSH cBrush = CreateSolidBrush(RGB(210, 218, 235));
                 SelectObject(dc, cBrush);
-                Ellipse(dc, p.x - 5, p.y - 5, p.x + 5, p.y + 5);
+                Ellipse(dc, p.x - 4, p.y - 4, p.x + 4, p.y + 4);
 
                 SelectObject(dc, oP);
                 SelectObject(dc, oB);
@@ -561,7 +544,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         HBRUSH btnBrush = CreateSolidBrush(RGB(28, 32, 44));
         HGDIOBJ oP = SelectObject(dc, btnPen);
         HGDIOBJ oB = SelectObject(dc, btnBrush);
-        RoundRect(dc, btnRect.left, btnRect.top, btnRect.right, btnRect.bottom, 16, 16);
+        RoundRect(dc, btnRect.left, btnRect.top, btnRect.right, btnRect.bottom, 14, 14);
         SelectObject(dc, oP);
         SelectObject(dc, oB);
         DeleteObject(btnPen);
@@ -572,15 +555,14 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         DrawTextW(dc, L"Other sign-in options", -1, &btnRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
         // Render Escape hint at bottom
-        RECT footerRect{0, rect.bottom - 24, rect.right, rect.bottom - 6};
+        RECT footerRect{0, rect.bottom - 22, rect.right, rect.bottom - 4};
         SelectObject(dc, hintFont);
-        SetTextColor(dc, RGB(160, 168, 185));
+        SetTextColor(dc, RGB(155, 162, 178));
         DrawTextW(dc, L"Press Esc to reset pattern", -1, &footerRect, DT_CENTER | DT_SINGLELINE);
 
         if (prevPen) SelectObject(dc, prevPen);
         if (linePen) DeleteObject(linePen);
         SelectObject(dc, oldFont);
-        DeleteObject(titleFont);
         DeleteObject(subFont);
         DeleteObject(btnFont);
         DeleteObject(hintFont);
@@ -611,8 +593,8 @@ HRESULT DrawPatternInteractive(
     auto* dialog = reinterpret_cast<DLGTEMPLATE*>(buffer);
     // Frameless popup window
     dialog->style = WS_POPUP;
-    dialog->cx = 240;
-    dialog->cy = 275;
+    dialog->cx = 200;
+    dialog->cy = 200;
     State state;
     state.hide = hideTrail;
     state.verifier = verifier;

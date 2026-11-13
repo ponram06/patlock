@@ -12,6 +12,19 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Zero-Overlap Alignment with Reference Mockup & Tile Decluttering
+- Built:
+  - Zero-Overlap Placement: Positioned the transparent 280x280 pattern window at `screenHeight / 2 + 30`, cleanly below the user avatar and `testuser` username. Avatar and username are completely unobstructed.
+  - Tile Text Decluttering: Set `SFI_LARGE_TEXT` and `SFI_LAUNCHWINDOW_LINK` to `CPFS_HIDDEN` in `src/provider/common.h`. LogonUI now renders an entirely clean space under `testuser` with zero colliding background text ("Pattern", "Draw pattern").
+  - Reference Mockup Alignment: Styled the 9 dots with dark slate circular discs (`RGB(44, 48, 60)`) and pearl-gray centers (`RGB(210, 218, 235)`), directly matching the user's reference photo.
+  - Compact Layout: 68px dot spacing with dynamic subtitle above and a clean `[ Other sign-in options ]` button below.
+- Verified in VM by user:
+  - Phase 4 unlock previously verified.
+- Not verified yet:
+  - Live VM verification of zero-overlap positioning and mockup visual match.
+- Next step:
+  - User runs `update.cmd` in the VM and checks the new clean lock screen layout.
+
 ### 2026-11-13: 100% Transparent Lock-Screen Integration, "Other Sign-in Options" Button & Smart Hover Guard
 - Built:
   - 100% Transparent Lock-Screen Integration: Replaced the dark background card with true `LWA_COLORKEY` transparency (`RGB(2, 4, 6)`), allowing the Windows 11 lock-screen wallpaper to show through 100% cleanly without any dark box or obstruction.
