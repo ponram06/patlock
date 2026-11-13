@@ -12,6 +12,24 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: GDI+ Vector Anti-Aliasing & Background Icon Elimination
+- Built:
+  - GDI+ Vector Anti-Aliasing (`src/common/pattern_window.cpp`):
+    - Enabled GDI+ `SmoothingModeAntiAlias` and `TextRenderingHintClearTypeGridFit`.
+    - Completely replaced jagged Bresenham GDI ellipses with smooth, circular anti-aliased vector dots.
+    - Added rounded caps and joins (`LineCapRound`, `LineJoinRound`) to line rendering.
+  - Eliminated Background Icon Bleed-Through:
+    - In `src/provider/common.h`: changed `SFI_TILEIMAGE` to `CPFS_DISPLAY_IN_DESELECTED_TILE` so Windows LogonUI does not render the square tile logo inside the selected tile.
+    - Used a midnight-slate Fluent glass plate (`Gdiplus::Color(255, 18, 22, 30)`) with transparent rounded corners (`TransparentKey` margin): covers and masks the underlying LogonUI icons completely while floating seamlessly on the lock screen wallpaper.
+    - Positioned at `screenHeight / 2 + 35`, directly below `testuser` with zero overlap on avatar or username.
+    - Clean `"Other sign-in options"` link at the bottom with `IDC_HAND` cursor.
+- Verified in VM by user:
+  - Phase 4 unlock verified.
+- Not verified yet:
+  - Live VM verification of GDI+ smooth anti-aliased dots and zero icon bleed.
+- Next step:
+  - User runs `update.cmd` in VM and tests lock screen appearance.
+
 ### 2026-11-13: Reference Mockup Visual Redesign & Lockout Auto-Recovery
 - Built:
   - Exact Visual Match with User Reference Mockup (`src/common/pattern_window.cpp`):

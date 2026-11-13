@@ -51,7 +51,7 @@ struct FIELD_STATE_PAIR
 // The Field interactive state indicates when
 static const FIELD_STATE_PAIR s_rgFieldStatePairs[] =
 {
-    { CPFS_DISPLAY_IN_BOTH,            CPFIS_NONE    },    // SFI_TILEIMAGE
+    { CPFS_DISPLAY_IN_DESELECTED_TILE, CPFIS_NONE    },    // SFI_TILEIMAGE
     { CPFS_HIDDEN,                     CPFIS_NONE    },    // SFI_LABEL
     { CPFS_HIDDEN,                     CPFIS_NONE    },    // SFI_LARGE_TEXT
     { CPFS_HIDDEN,                     CPFIS_NONE    },    // SFI_PASSWORD

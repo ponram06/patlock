@@ -1,67 +1,31 @@
 #include "pattern_window.h"
 #include "arming_gate.h"
+#include <windows.h>
 #include <windowsx.h>
+#include <gdiplus.h>
 #include <algorithm>
 #include <cmath>
 #include <strsafe.h>
 
+#pragma comment(lib, "gdiplus.lib")
+
 namespace patlock {
 namespace {
 
-// ── Visual Palette (Exact Match to User Mockup) ──────────────────────────────
-// 100% transparent color key: the blurred lock-screen wallpaper shows through everywhere.
-// No rectangular container, no card, no borders. Just clean floating dots.
-
+// ── Color Key for Outer Transparent Margins ──────────────────────────────────
 constexpr COLORREF TransparentKey = RGB(1, 1, 1);
 
-// Idle dots: dark slate circular discs floating directly on the wallpaper
-constexpr COLORREF DotDiscBg     = RGB(22, 26, 35);
-constexpr COLORREF DotDiscRim    = RGB(42, 48, 62);
-constexpr COLORREF DotCenter     = RGB(72, 80, 100);
-constexpr int      DotOuterR     = 13;
-constexpr int      DotInnerR     = 4;
-
-// Hovered dot
-constexpr COLORREF HoverDiscBg   = RGB(18, 48, 88);
-constexpr COLORREF HoverDiscRim  = RGB(0, 160, 255);
-constexpr COLORREF HoverCenter   = RGB(200, 230, 255);
-constexpr int      HoverOuterR   = 15;
-constexpr int      HoverInnerR   = 5;
-
-// Visited / Connected dot
-constexpr COLORREF ActiveDiscBg  = RGB(12, 48, 95);
-constexpr COLORREF ActiveDiscRim = RGB(0, 170, 255);
-constexpr COLORREF ActiveCenter  = RGB(255, 255, 255);
-constexpr int      ActiveOuterR  = 15;
-constexpr int      ActiveInnerR  = 6;
-
-// Line
-constexpr COLORREF LineDraw      = RGB(0, 170, 255);
-constexpr int      LineWidth     = 5;
-
-// Success
-constexpr COLORREF SuccessLine   = RGB(46, 213, 115);
-constexpr COLORREF SuccessRim    = RGB(46, 213, 115);
-constexpr COLORREF SuccessBg     = RGB(18, 65, 40);
-constexpr COLORREF SuccessCore   = RGB(235, 255, 240);
-
-// Error
-constexpr COLORREF ErrorLine     = RGB(255, 75, 75);
-constexpr COLORREF ErrorRim      = RGB(255, 75, 75);
-constexpr COLORREF ErrorBg       = RGB(70, 20, 25);
-constexpr COLORREF ErrorCore     = RGB(255, 225, 230);
-
-// Layout & Dimensions
+// Layout constants
 constexpr int WindowW     = 280;
-constexpr int WindowH     = 280;
-constexpr int GridSpacing = 64;
-constexpr int GridTopY    = 58;    // Center Y of row 0
+constexpr int WindowH     = 292;
+constexpr int GridSpacing = 62;
+constexpr int GridTopY    = 80;    // Center Y of row 0 inside the card
 constexpr int HitRadius   = 28;
 
 RECT SigninLinkRect(int windowWidth) noexcept {
     const int linkWidth = 180;
     const int left = (windowWidth - linkWidth) / 2;
-    return {left, 228, left + linkWidth, 256};
+    return {left, 246, left + linkWidth, 274};
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -91,18 +55,15 @@ struct Layout {
     int x;
     int y;
     int spacing;
-    int radius;
     int hitRadius;
 };
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 Layout Grid(HWND window) noexcept {
     RECT r{};
     GetClientRect(window, &r);
     const int cw = static_cast<int>(r.right);
     const int startX = cw / 2 - GridSpacing;
-    return {startX, GridTopY, GridSpacing, DotOuterR, HitRadius};
+    return {startX, GridTopY, GridSpacing, HitRadius};
 }
 
 POINT Dot(Layout grid, int dot) noexcept {
@@ -213,16 +174,13 @@ void FinishPattern(HWND window, State& state) noexcept {
     }
 }
 
-void DrawDisc(HDC dc, int cx, int cy, int r, COLORREF fill, COLORREF rim, int rimWidth = 1) noexcept {
-    HPEN pen = CreatePen(PS_SOLID, rimWidth, rim);
-    HBRUSH brush = CreateSolidBrush(fill);
-    HGDIOBJ oldPen = SelectObject(dc, pen);
-    HGDIOBJ oldBrush = SelectObject(dc, brush);
-    Ellipse(dc, cx - r, cy - r, cx + r, cy + r);
-    SelectObject(dc, oldPen);
-    SelectObject(dc, oldBrush);
-    DeleteObject(pen);
-    DeleteObject(brush);
+void AddRoundedRect(Gdiplus::GraphicsPath& path, Gdiplus::RectF rect, float radius) noexcept {
+    float d = 2.0f * radius;
+    path.AddArc(rect.X, rect.Y, d, d, 180.0f, 90.0f);
+    path.AddArc(rect.X + rect.Width - d, rect.Y, d, d, 270.0f, 90.0f);
+    path.AddArc(rect.X + rect.Width - d, rect.Y + rect.Height - d, d, d, 0.0f, 90.0f);
+    path.AddArc(rect.X, rect.Y + rect.Height - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
 }
 
 // ── Dialog Procedure ─────────────────────────────────────────────────────────
@@ -234,16 +192,17 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         SetWindowLongPtrW(window, DWLP_USER, lp);
         SetWindowTextW(window, L"Patlock");
 
-        // 100% Transparent layered window
+        // Transparent layered window for floating rounded corners
         LONG_PTR exStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
         SetWindowLongPtrW(window, GWL_EXSTYLE, exStyle | WS_EX_LAYERED);
         SetLayeredWindowAttributes(window, TransparentKey, 0, LWA_COLORKEY);
 
-        // Position: centered horizontally, placed 45px below center to clear avatar & username
+        // Position: centered horizontally, placed 35px below screen center
+        // Sits cleanly below 'testuser' without any overlap!
         int screenWidth = GetSystemMetrics(SM_CXSCREEN);
         int screenHeight = GetSystemMetrics(SM_CYSCREEN);
         int posX = (screenWidth - WindowW) / 2;
-        int posY = screenHeight / 2 + 45;
+        int posY = screenHeight / 2 + 35;
         SetWindowPos(window, HWND_TOP, posX, posY, WindowW, WindowH, SWP_SHOWWINDOW);
 
         const POINT cur = CursorClient(window);
@@ -441,156 +400,181 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         EndDialog(window, IDCANCEL);
         return TRUE;
 
-    // ── Painting (100% Transparent Wallpaper Integration) ───────────────────
+    // ── GDI+ Anti-Aliased Fluent Surface Rendering ───────────────────────────
     case WM_PAINT: {
         PAINTSTRUCT paint{};
         HDC hdc = BeginPaint(window, &paint);
         RECT rect{};
         GetClientRect(window, &rect);
 
-        // Double buffer for 60fps flicker-free rendering
-        HDC dc = CreateCompatibleDC(hdc);
+        // Double buffer
+        HDC memDC = CreateCompatibleDC(hdc);
         HBITMAP memBmp = CreateCompatibleBitmap(hdc, rect.right, rect.bottom);
-        HGDIOBJ oldBmp = SelectObject(dc, memBmp);
+        HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
 
-        // 1) Fill entire canvas with transparent color-key (wallpaper shows through cleanly!)
+        // 1) Fill outside with TransparentKey (outer margin)
         HBRUSH keyBrush = CreateSolidBrush(TransparentKey);
-        FillRect(dc, &rect, keyBrush);
+        FillRect(memDC, &rect, keyBrush);
         DeleteObject(keyBrush);
-        SetBkMode(dc, TRANSPARENT);
 
-        // ── Status Text & Colors ─────────────────────────────────────────────
-        COLORREF lineColor = LineDraw;
-        COLORREF ringColor = ActiveDiscRim;
-        COLORREF discBg    = ActiveDiscBg;
-        COLORREF coreColor = ActiveCenter;
+        {
+            Gdiplus::Graphics g(memDC);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
 
-        wchar_t statusMsg[64] = L"";
-        COLORREF statusColor = RGB(170, 185, 210);
-        bool showStatus = false;
+            // 2) Draw solid midnight-slate card with rounded corners:
+            // This completely COVERS and HIDES any background LogonUI icons!
+            Gdiplus::GraphicsPath cardPath;
+            AddRoundedRect(cardPath, Gdiplus::RectF(6.0f, 6.0f, rect.right - 12.0f, rect.bottom - 12.0f), 20.0f);
 
-        if (state->visual == VisualState::Drawing) {
-            if (state->pattern.count > 0) {
-                if (state->pattern.count < 5) {
-                    StringCchPrintfW(statusMsg, ARRAYSIZE(statusMsg), L"%zu / 5 dots", state->pattern.count);
-                    statusColor = RGB(120, 205, 255);
-                } else {
-                    StringCchPrintfW(statusMsg, ARRAYSIZE(statusMsg), L"%zu dots connected", state->pattern.count);
-                    statusColor = RGB(70, 225, 130);
+            Gdiplus::SolidBrush cardBgBrush(Gdiplus::Color(255, 18, 22, 30));
+            g.FillPath(&cardBgBrush, &cardPath);
+
+            Gdiplus::Pen cardBorderPen(Gdiplus::Color(160, 56, 64, 82), 1.0f);
+            g.DrawPath(&cardBorderPen, &cardPath);
+
+            // ── Colors by state ──────────────────────────────────────────────
+            Gdiplus::Color lineColor(255, 0, 170, 255);
+            Gdiplus::Color ringColor(255, 0, 170, 255);
+            Gdiplus::Color discBg(255, 12, 48, 96);
+            Gdiplus::Color coreColor(255, 255, 255, 255);
+
+            wchar_t statusMsg[64] = L"Draw pattern to unlock";
+            Gdiplus::Color statusColor(255, 160, 172, 195);
+
+            if (state->visual == VisualState::Drawing) {
+                if (state->pattern.count > 0) {
+                    if (state->pattern.count < 5) {
+                        StringCchPrintfW(statusMsg, ARRAYSIZE(statusMsg), L"%zu / 5 dots connected", state->pattern.count);
+                        statusColor = Gdiplus::Color(255, 90, 205, 255);
+                    } else {
+                        StringCchPrintfW(statusMsg, ARRAYSIZE(statusMsg), L"%zu dots connected", state->pattern.count);
+                        statusColor = Gdiplus::Color(255, 50, 220, 125);
+                    }
+                } else if (!state->gate.Armed()) {
+                    StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Move pointer away to start");
+                    statusColor = Gdiplus::Color(255, 255, 195, 80);
                 }
-                showStatus = true;
-            } else if (!state->gate.Armed()) {
-                StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Move pointer away to start");
-                statusColor = RGB(255, 195, 80);
-                showStatus = true;
+            } else if (state->visual == VisualState::Success) {
+                StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Signing in...");
+                statusColor = Gdiplus::Color(255, 46, 213, 115);
+                lineColor   = Gdiplus::Color(255, 46, 213, 115);
+                ringColor   = Gdiplus::Color(255, 46, 213, 115);
+                discBg      = Gdiplus::Color(255, 18, 65, 40);
+                coreColor   = Gdiplus::Color(255, 240, 255, 245);
+            } else if (state->visual == VisualState::ErrorWrong) {
+                StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Incorrect pattern");
+                statusColor = Gdiplus::Color(255, 255, 75, 75);
+                lineColor   = Gdiplus::Color(255, 255, 75, 75);
+                ringColor   = Gdiplus::Color(255, 255, 75, 75);
+                discBg      = Gdiplus::Color(255, 70, 20, 25);
+                coreColor   = Gdiplus::Color(255, 255, 225, 230);
+            } else if (state->visual == VisualState::ErrorTooShort) {
+                StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Connect at least 5 dots");
+                statusColor = Gdiplus::Color(255, 255, 75, 75);
+                lineColor   = Gdiplus::Color(255, 255, 75, 75);
+                ringColor   = Gdiplus::Color(255, 255, 75, 75);
+                discBg      = Gdiplus::Color(255, 70, 20, 25);
+                coreColor   = Gdiplus::Color(255, 255, 225, 230);
+            } else if (state->visual == VisualState::ErrorLockout) {
+                StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Locked out. Wait a moment.");
+                statusColor = Gdiplus::Color(255, 255, 75, 75);
+                lineColor   = Gdiplus::Color(255, 255, 75, 75);
+                ringColor   = Gdiplus::Color(255, 255, 75, 75);
+                discBg      = Gdiplus::Color(255, 70, 20, 25);
+                coreColor   = Gdiplus::Color(255, 255, 225, 230);
             }
-        } else if (state->visual == VisualState::Success) {
-            StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Signing in...");
-            statusColor = SuccessLine;
-            lineColor = SuccessLine;
-            ringColor = SuccessRim;
-            discBg = SuccessBg;
-            coreColor = SuccessCore;
-            showStatus = true;
-        } else if (state->visual == VisualState::ErrorWrong) {
-            StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Incorrect pattern");
-            statusColor = ErrorLine;
-            lineColor = ErrorLine;
-            ringColor = ErrorRim;
-            discBg = ErrorBg;
-            coreColor = ErrorCore;
-            showStatus = true;
-        } else if (state->visual == VisualState::ErrorTooShort) {
-            StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Connect at least 5 dots");
-            statusColor = ErrorLine;
-            lineColor = ErrorLine;
-            ringColor = ErrorRim;
-            discBg = ErrorBg;
-            coreColor = ErrorCore;
-            showStatus = true;
-        } else if (state->visual == VisualState::ErrorLockout) {
-            StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Locked out. Wait a moment.");
-            statusColor = ErrorLine;
-            lineColor = ErrorLine;
-            ringColor = ErrorRim;
-            discBg = ErrorBg;
-            coreColor = ErrorCore;
-            showStatus = true;
+
+            // ── Top Subtitle Status ──────────────────────────────────────────
+            Gdiplus::Font statusFont(L"Segoe UI", 10.5f, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+            Gdiplus::SolidBrush statusBrush(statusColor);
+            Gdiplus::StringFormat centerFmt;
+            centerFmt.SetAlignment(Gdiplus::StringAlignmentCenter);
+            centerFmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+
+            Gdiplus::RectF statusRect(0.0f, 16.0f, static_cast<float>(rect.right), 26.0f);
+            g.DrawString(statusMsg, -1, &statusFont, statusRect, &centerFmt, &statusBrush);
+
+            const Layout grid = Grid(window);
+
+            // ── Anti-Aliased Connecting Lines with Rounded Caps ──────────────
+            Gdiplus::Pen linePen(lineColor, 5.0f);
+            linePen.SetStartCap(Gdiplus::LineCapRound);
+            linePen.SetEndCap(Gdiplus::LineCapRound);
+            linePen.SetLineJoin(Gdiplus::LineJoinRound);
+
+            if (!state->hide && state->pattern.count) {
+                for (size_t i = 1; i < state->pattern.count; ++i) {
+                    POINT p1 = Dot(grid, state->pattern.dots[i - 1]);
+                    POINT p2 = Dot(grid, state->pattern.dots[i]);
+                    g.DrawLine(&linePen, p1.x, p1.y, p2.x, p2.y);
+                }
+                if (state->dragging && state->visual == VisualState::Drawing) {
+                    POINT last = Dot(grid, state->pattern.dots[state->pattern.count - 1]);
+                    g.DrawLine(&linePen, last.x, last.y, state->previous.x, state->previous.y);
+                }
+            }
+
+            // ── 9 Smooth Anti-Aliased Floating Dots (Mockup Match!) ──────────
+            for (BYTE i = 0; i < 9; ++i) {
+                const POINT p = Dot(grid, i);
+                const bool visited = !state->hide && state->pattern.Contains(i);
+                const bool hovered = (!visited && state->hoverDot == i && state->visual == VisualState::Drawing);
+
+                if (visited) {
+                    // Connected dot: outer ring + inner core
+                    float rOut = 14.0f;
+                    Gdiplus::SolidBrush db(discBg);
+                    g.FillEllipse(&db, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
+                    Gdiplus::Pen rp(ringColor, 2.5f);
+                    g.DrawEllipse(&rp, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
+
+                    float rIn = 5.5f;
+                    Gdiplus::SolidBrush cb(coreColor);
+                    g.FillEllipse(&cb, p.x - rIn, p.y - rIn, 2.0f * rIn, 2.0f * rIn);
+                } else if (hovered) {
+                    // Hovered dot: cyan accent ring
+                    float rOut = 13.5f;
+                    Gdiplus::SolidBrush db(Gdiplus::Color(255, 18, 48, 88));
+                    g.FillEllipse(&db, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
+                    Gdiplus::Pen hp(Gdiplus::Color(255, 0, 160, 255), 2.0f);
+                    g.DrawEllipse(&hp, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
+
+                    float rIn = 4.5f;
+                    Gdiplus::SolidBrush cb(Gdiplus::Color(255, 210, 235, 255));
+                    g.FillEllipse(&cb, p.x - rIn, p.y - rIn, 2.0f * rIn, 2.0f * rIn);
+                } else {
+                    // Idle dot: clean, smooth solid dark circle
+                    float r = 10.5f;
+                    Gdiplus::SolidBrush dotBrush(Gdiplus::Color(255, 34, 38, 50));
+                    g.FillEllipse(&dotBrush, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
+
+                    Gdiplus::Pen dotRim(Gdiplus::Color(255, 58, 66, 84), 1.0f);
+                    g.DrawEllipse(&dotRim, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
+
+                    // Small subtle pearl center pip
+                    float rPip = 2.5f;
+                    Gdiplus::SolidBrush pipBrush(Gdiplus::Color(255, 95, 105, 125));
+                    g.FillEllipse(&pipBrush, p.x - rPip, p.y - rPip, 2.0f * rPip, 2.0f * rPip);
+                }
+            }
+
+            // ── "Other sign-in options" Link at Bottom ───────────────────────
+            Gdiplus::Font linkFont(L"Segoe UI", 10.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
+            Gdiplus::Color linkColor = state->hoverLink
+                ? Gdiplus::Color(255, 255, 255, 255)
+                : Gdiplus::Color(255, 210, 218, 235);
+            Gdiplus::SolidBrush linkBrush(linkColor);
+
+            Gdiplus::RectF linkRect(0.0f, 244.0f, static_cast<float>(rect.right), 26.0f);
+            g.DrawString(L"Other sign-in options", -1, &linkFont, linkRect, &centerFmt, &linkBrush);
         }
 
-        // ── Render Top Status Text ───────────────────────────────────────────
-        if (showStatus) {
-            HFONT statusFont = CreateFontW(-13, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-            HGDIOBJ oldF = SelectObject(dc, statusFont);
-            SetTextColor(dc, statusColor);
-            RECT statusRect = {0, 14, rect.right, 38};
-            DrawTextW(dc, statusMsg, -1, &statusRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-            SelectObject(dc, oldF);
-            DeleteObject(statusFont);
-        }
-
-        const Layout grid = Grid(window);
-
-        // ── Connecting Lines with Live Rubber-Band ────────────────────────────
-        LOGBRUSH lb{BS_SOLID, lineColor, 0};
-        HPEN linePen = ExtCreatePen(PS_GEOMETRIC | PS_SOLID | PS_ENDCAP_ROUND | PS_JOIN_ROUND,
-            LineWidth, &lb, 0, nullptr);
-        HGDIOBJ prevPen = linePen ? SelectObject(dc, linePen) : nullptr;
-
-        if (!state->hide && state->pattern.count) {
-            POINT p = Dot(grid, state->pattern.dots[0]);
-            MoveToEx(dc, p.x, p.y, nullptr);
-            for (size_t i = 1; i < state->pattern.count; ++i) {
-                p = Dot(grid, state->pattern.dots[i]);
-                LineTo(dc, p.x, p.y);
-            }
-            if (state->dragging && state->visual == VisualState::Drawing) {
-                LineTo(dc, state->previous.x, state->previous.y);
-            }
-        }
-
-        if (prevPen) SelectObject(dc, prevPen);
-        if (linePen) DeleteObject(linePen);
-
-        // ── Render 9 Floating Dark Discs ─────────────────────────────────────
-        for (BYTE i = 0; i < 9; ++i) {
-            const POINT p = Dot(grid, i);
-            const bool visited = !state->hide && state->pattern.Contains(i);
-            const bool hovered = (!visited && state->hoverDot == i && state->visual == VisualState::Drawing);
-
-            if (visited) {
-                // Connected dot: glowing accent ring + white center
-                DrawDisc(dc, p.x, p.y, ActiveOuterR, discBg, ringColor, 2);
-                DrawDisc(dc, p.x, p.y, ActiveInnerR, coreColor, coreColor);
-            } else if (hovered) {
-                // Hovered dot: highlight ring
-                DrawDisc(dc, p.x, p.y, HoverOuterR, HoverDiscBg, HoverDiscRim, 2);
-                DrawDisc(dc, p.x, p.y, HoverInnerR, HoverCenter, HoverCenter);
-            } else {
-                // Idle dot: clean solid dark disc floating on wallpaper (Mockup match!)
-                DrawDisc(dc, p.x, p.y, DotOuterR, DotDiscBg, DotDiscRim, 1);
-                DrawDisc(dc, p.x, p.y, DotInnerR, DotCenter, DotCenter);
-            }
-        }
-
-        // ── Render "Other sign-in options" Link ───────────────────────────────
-        RECT linkRect = SigninLinkRect(rect.right);
-        HFONT linkFont = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-        HGDIOBJ oldF = SelectObject(dc, linkFont);
-        SetTextColor(dc, state->hoverLink ? RGB(255, 255, 255) : RGB(220, 226, 238));
-        DrawTextW(dc, L"Other sign-in options", -1, &linkRect, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
-        SelectObject(dc, oldF);
-        DeleteObject(linkFont);
-
-        // Blit to screen
-        BitBlt(hdc, 0, 0, rect.right, rect.bottom, dc, 0, 0, SRCCOPY);
-        SelectObject(dc, oldBmp);
+        // Blit double buffer to screen
+        BitBlt(hdc, 0, 0, rect.right, rect.bottom, memDC, 0, 0, SRCCOPY);
+        SelectObject(memDC, oldBmp);
         DeleteObject(memBmp);
-        DeleteDC(dc);
+        DeleteDC(memDC);
         EndPaint(window, &paint);
         return TRUE;
     }
@@ -608,6 +592,12 @@ HRESULT DrawPatternInteractive(
     Pattern& output) noexcept
 {
     output.Clear();
+
+    // Initialize GDI+ for anti-aliasing
+    ULONG_PTR gdiplusToken = 0;
+    Gdiplus::GdiplusStartupInput gdiplusStartupInput;
+    Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
+
     alignas(DWORD) BYTE buffer[sizeof(DLGTEMPLATE) + 3 * sizeof(WORD)]{};
     auto* dialog = reinterpret_cast<DLGTEMPLATE*>(buffer);
     dialog->style = WS_POPUP;
@@ -617,6 +607,9 @@ HRESULT DrawPatternInteractive(
     state.hide = hideTrail;
     state.verifier = verifier;
     const INT_PTR result = DialogBoxIndirectParamW(instance, dialog, owner, Dialog, reinterpret_cast<LPARAM>(&state));
+
+    Gdiplus::GdiplusShutdown(gdiplusToken);
+
     if (result == IDOK && state.pattern.Valid()) {
         output = state.pattern;
         return S_OK;
