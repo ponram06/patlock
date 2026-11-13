@@ -23,6 +23,20 @@ HRESULT HashPattern(const Pattern& pattern, const BYTE salt[16], BYTE hash[32]) 
     BCryptCloseAlgorithmProvider(algorithm, 0);
     return result >= 0 ? S_OK : E_FAIL;
 }
+HRESULT DeriveTpmAuthorization(const Pattern& pattern, const BYTE salt[16], BYTE auth[32]) noexcept {
+    if (!pattern.Valid()) return E_INVALIDARG;
+    Secret<BYTE, 9> encoded;
+    for (size_t i = 0; i < pattern.count; ++i) encoded.value[i] = static_cast<BYTE>('0' + pattern.dots[i]);
+    BYTE scopedSalt[19]{};
+    CopyMemory(scopedSalt, salt, 16);
+    scopedSalt[16] = 'T'; scopedSalt[17] = 'P'; scopedSalt[18] = 'M';
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG) < 0) return E_FAIL;
+    const NTSTATUS result = BCryptDeriveKeyPBKDF2(algorithm, encoded.data(), static_cast<ULONG>(pattern.count),
+        scopedSalt, sizeof(scopedSalt), HashIterations, auth, 32, 0);
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    return result >= 0 ? S_OK : E_FAIL;
+}
 HRESULT ValidatePassword(PCWSTR user, PCWSTR password, wchar_t (&sid)[184]) noexcept {
     sid[0] = L'\0';
     if (!user || !*user || !password || !*password || wcschr(user, L'\\') || wcschr(user, L'@')) return E_INVALIDARG;

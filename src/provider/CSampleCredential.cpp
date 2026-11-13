@@ -698,15 +698,15 @@ HRESULT CSampleCredential::ReportResult(NTSTATUS ntsStatus,
                                         _Outptr_result_maybenull_ PWSTR *ppwszOptionalStatusText,
                                         _Out_ CREDENTIAL_PROVIDER_STATUS_ICON *pcpsiOptionalStatusIcon)
 {
-    if (!ppwszOptionalStatusText || !pcpsiOptionalStatusIcon) return E_POINTER;
-    *ppwszOptionalStatusText = nullptr; *pcpsiOptionalStatusIcon = CPSI_NONE;
+    if (ppwszOptionalStatusText) *ppwszOptionalStatusText = nullptr;
+    if (pcpsiOptionalStatusIcon) *pcpsiOptionalStatusIcon = CPSI_NONE;
     if (_awaitingResult) {
         if (ntsStatus == STATUS_SUCCESS && ntsSubstatus == STATUS_SUCCESS) {
             patlock::FinishSubmission(_pszUserSid, _submission.data());
         } else {
-            *pcpsiOptionalStatusIcon = CPSI_ERROR;
+            if (pcpsiOptionalStatusIcon) *pcpsiOptionalStatusIcon = CPSI_ERROR;
             patlock::Disable(_pszUserSid);
-            SHStrDupW(L"Windows declined the stored credential. Use Password and re-enroll Patlock. No automatic retry.", ppwszOptionalStatusText);
+            if (ppwszOptionalStatusText) SHStrDupW(L"Windows declined the stored credential. Use Password and re-enroll Patlock. No automatic retry.", ppwszOptionalStatusText);
         }
     }
     _awaitingResult = false; _submission.Clear(); _pattern.Clear(); _patternReady = false;

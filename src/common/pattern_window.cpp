@@ -199,10 +199,14 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
         // Position: centered horizontally, placed 35px below screen center
         // Sits cleanly below 'testuser' without any overlap!
-        int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-        int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-        int posX = (screenWidth - WindowW) / 2;
-        int posY = screenHeight / 2 + 35;
+        MONITORINFO monitor{}; monitor.cbSize = sizeof(monitor);
+        if (!GetMonitorInfoW(MonitorFromWindow(GetWindow(window, GW_OWNER), MONITOR_DEFAULTTOPRIMARY), &monitor)) {
+            EndDialog(window, -1); return TRUE;
+        }
+        const RECT area = monitor.rcWork;
+        const int posX = area.left + (area.right - area.left - WindowW) / 2;
+        const int preferredY = area.top + (area.bottom - area.top) / 2 + 35;
+        const int posY = (std::max)(static_cast<int>(area.top), (std::min)(preferredY, static_cast<int>(area.bottom) - WindowH - 16));
         SetWindowPos(window, HWND_TOP, posX, posY, WindowW, WindowH, SWP_SHOWWINDOW);
 
         const POINT cur = CursorClient(window);
@@ -378,7 +382,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
     case WM_CAPTURECHANGED:
     case WM_CANCELMODE:
-        if (state->dragging && !state->pattern.Valid()) ResetStroke(window, *state);
+        if (state->dragging) ResetStroke(window, *state);
         return TRUE;
 
     case WM_COMMAND:
@@ -456,7 +460,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                     statusColor = Gdiplus::Color(255, 255, 195, 80);
                 }
             } else if (state->visual == VisualState::Success) {
-                StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Signing in...");
+                    StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Pattern accepted");
                 statusColor = Gdiplus::Color(255, 46, 213, 115);
                 lineColor   = Gdiplus::Color(255, 46, 213, 115);
                 ringColor   = Gdiplus::Color(255, 46, 213, 115);
@@ -545,16 +549,16 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                     g.FillEllipse(&cb, p.x - rIn, p.y - rIn, 2.0f * rIn, 2.0f * rIn);
                 } else {
                     // Idle dot: clean, smooth solid dark circle
-                    float r = 10.5f;
+                    float r = 12.0f;
                     Gdiplus::SolidBrush dotBrush(Gdiplus::Color(255, 34, 38, 50));
                     g.FillEllipse(&dotBrush, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
 
-                    Gdiplus::Pen dotRim(Gdiplus::Color(255, 58, 66, 84), 1.0f);
+                    Gdiplus::Pen dotRim(Gdiplus::Color(255, 108, 122, 148), 1.0f);
                     g.DrawEllipse(&dotRim, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
 
                     // Small subtle pearl center pip
                     float rPip = 2.5f;
-                    Gdiplus::SolidBrush pipBrush(Gdiplus::Color(255, 95, 105, 125));
+                    Gdiplus::SolidBrush pipBrush(Gdiplus::Color(255, 175, 188, 211));
                     g.FillEllipse(&pipBrush, p.x - rPip, p.y - rPip, 2.0f * rPip, 2.0f * rPip);
                 }
             }
@@ -596,7 +600,7 @@ HRESULT DrawPatternInteractive(
     // Initialize GDI+ for anti-aliasing
     ULONG_PTR gdiplusToken = 0;
     Gdiplus::GdiplusStartupInput gdiplusStartupInput;
-    Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
+    if (Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr) != Gdiplus::Ok) return E_FAIL;
 
     alignas(DWORD) BYTE buffer[sizeof(DLGTEMPLATE) + 3 * sizeof(WORD)]{};
     auto* dialog = reinterpret_cast<DLGTEMPLATE*>(buffer);

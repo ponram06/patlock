@@ -42,7 +42,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
     if (SUCCEEDED(hr)) {
         const bool isTpm = (patlock::QueryTpmMode(sid) == S_OK);
         const wchar_t* modeMsg = isTpm
-            ? L"Enrolled successfully in TPM-hardened mode (Platform Crypto Provider).\nPattern unlock is active and persists across reboots."
+            ? L"Enrolled with a TPM-backed key (experimental; protection requires validation).\nPattern unlock is active and persists across reboots."
             : L"Enrolled successfully in baseline mode (software store).\nPattern unlock is active and persists across reboots.";
         MessageBoxW(nullptr, modeMsg, L"Patlock", MB_OK | MB_ICONINFORMATION);
     } else {
@@ -50,10 +50,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         if (hr == HRESULT_FROM_WIN32(ERROR_LOGON_FAILURE)) {
             StringCchPrintfW(errorMsg, ARRAYSIZE(errorMsg),
                 L"Windows rejected the password for '%s'.\n\n"
-                L"If '1684' is a Windows Hello PIN, note that Windows PINs cannot be used here.\n"
-                L"Set an actual local password in elevated CMD with:\n"
-                L"  net user %s 1684",
-                cleanUser, cleanUser);
+                L"Enter the account's Windows password, not its Windows Hello PIN.\n"
+                L"If needed, configure a password in Windows Settings, then try again.",
+                cleanUser);
         } else if (hr == E_INVALIDARG) {
             StringCchPrintfW(errorMsg, ARRAYSIZE(errorMsg),
                 L"Invalid input or mismatched pattern confirmation.\n"

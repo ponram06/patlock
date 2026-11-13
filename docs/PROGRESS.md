@@ -12,6 +12,23 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Current-source audit and local repairs
+- Written: disabled-record enforcement, optional ReportResult output handling,
+  completion-token checks, separate TPM authorization derivation (record v4),
+  removal of binary PIN fallback and hardcoded password advice, capture-loss
+  cancellation, GDI+ initialization failure handling, stronger dot contrast and
+  owner-monitor work-area placement. No push authorized for this checkpoint.
+- Added AUDIT_2026-11-13.md with confirmed findings, compatibility change,
+  remaining release blockers and VM test cases; RELEASE_REPAIR_PROMPT.md contains
+  the requested detailed security/UI continuation prompt.
+- Verification: source review and whitespace checks only; new derivation tests
+  written for the VM. No host build, executable tests or registry modifications.
+- VM action: re-enroll after upgrading to record v4; run CTest and the audit's
+  stale-password, nullable-output, token, capture-loss and visual cases.
+- Not verified: compilation, runtime authentication, TPM policy, ACL/persistence
+  fault behavior, DPI/accessibility or market readiness. TPM transactionality,
+  submission crash handling and flush-failure activation remain release blockers.
+
 ### 2026-11-13: GDI+ Vector Anti-Aliasing & Background Icon Elimination
 - Built:
   - GDI+ Vector Anti-Aliasing (`src/common/pattern_window.cpp`):

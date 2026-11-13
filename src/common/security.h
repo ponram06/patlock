@@ -17,6 +17,7 @@ inline constexpr ULONG HashIterations = 600000;
 bool Equal(const BYTE* left, const BYTE* right, size_t length) noexcept;
 HRESULT Random(BYTE* output, ULONG length) noexcept;
 HRESULT HashPattern(const Pattern& pattern, const BYTE salt[16], BYTE hash[32]) noexcept;
+HRESULT DeriveTpmAuthorization(const Pattern& pattern, const BYTE salt[16], BYTE auth[32]) noexcept;
 // Account must be an unqualified local username; SID comes from the verified token.
 HRESULT ValidatePassword(PCWSTR user, PCWSTR password, wchar_t (&sid)[184]) noexcept;
 HRESULT Enroll(PCWSTR user, PCWSTR sid, PCWSTR password, const Pattern& pattern) noexcept;

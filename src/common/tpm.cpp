@@ -6,8 +6,8 @@
 //
 // The symmetric AES-256 key used to encrypt the Windows password is wrapped
 // with RSA-OAEP (SHA-256) inside the TPM. Decryption requires the TPM hardware
-// and the correct pattern hash. Failed attempts are rate-limited by the TPM's
-// hardware anti-hammering dictionary attack logic.
+// and a separately derived pattern authorization value. Authorization behavior
+// and dictionary-attack protection remain unverified on the target TPM/KSP.
 //
 // Falls back to baseline mode if the TPM or Platform Crypto Provider is unavailable.
 //
@@ -86,13 +86,9 @@ HRESULT ProtectKey(PCWSTR sid, const BYTE authValue[32], const BYTE plainKey[32]
         reinterpret_cast<PBYTE>(&keyLength), sizeof(keyLength), 0);
     if (status != ERROR_SUCCESS) return HRESULT_FROM_WIN32(status);
 
-    // Set usage authorization to the pattern hash
+    // Supply the separately derived authorization; never the stored verifier.
     status = NCryptSetProperty(key.h, PCP_USAGEAUTH,
         const_cast<PBYTE>(authValue), 32, 0);
-    if (status != ERROR_SUCCESS) {
-        status = NCryptSetProperty(key.h, NCRYPT_PIN_PROPERTY,
-            const_cast<PBYTE>(authValue), 32, 0);
-    }
     if (status != ERROR_SUCCESS) return HRESULT_FROM_WIN32(status);
 
     status = NCryptFinalizeKey(key.h, 0);
@@ -131,10 +127,6 @@ HRESULT UnprotectKey(PCWSTR sid, const BYTE authValue[32], const BYTE wrappedKey
     // Supply usage authorization
     status = NCryptSetProperty(key.h, PCP_USAGEAUTH,
         const_cast<PBYTE>(authValue), 32, 0);
-    if (status != ERROR_SUCCESS) {
-        status = NCryptSetProperty(key.h, NCRYPT_PIN_PROPERTY,
-            const_cast<PBYTE>(authValue), 32, 0);
-    }
     if (status != ERROR_SUCCESS) return HRESULT_FROM_WIN32(status);
 
     // Decrypt wrappedKey with RSA-OAEP SHA-256

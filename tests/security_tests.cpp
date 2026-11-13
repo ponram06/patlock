@@ -22,6 +22,13 @@ int main() {
     check(SUCCEEDED(patlock::HashPattern(b, salt, reversed.data())), "HashPattern b reversed");
     check(patlock::Equal(first.data(), second.data(), 32), "Identical pattern hashes match");
     check(!patlock::Equal(first.data(), reversed.data(), 32), "Reversed pattern hashes differ");
+    patlock::Secret<BYTE, 32> auth, authAgain, reversedAuth;
+    check(SUCCEEDED(patlock::DeriveTpmAuthorization(a, salt, auth.data())), "Derive TPM authorization");
+    check(SUCCEEDED(patlock::DeriveTpmAuthorization(a, salt, authAgain.data())), "Repeat TPM authorization");
+    check(SUCCEEDED(patlock::DeriveTpmAuthorization(b, salt, reversedAuth.data())), "Reverse TPM authorization");
+    check(patlock::Equal(auth.data(), authAgain.data(), 32), "TPM authorization is deterministic");
+    check(!patlock::Equal(auth.data(), first.data(), 32), "Stored verifier is not TPM authorization");
+    check(!patlock::Equal(auth.data(), reversedAuth.data(), 32), "TPM authorization preserves order");
 
     // Escalating lockout policy (Phase 5)
     // 0-4 attempts: 0s delay

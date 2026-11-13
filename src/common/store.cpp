@@ -13,7 +13,7 @@ constexpr ULONGLONG Second = 10000000ULL;
 
 struct Record {
     DWORD magic = 0x5041544c;
-    DWORD version = 3;
+    DWORD version = 4;
     DWORD iterations = HashIterations;
     DWORD attempts = 0;
     DWORD disabled = 0;
@@ -147,7 +147,7 @@ HRESULT Read(Key& user, PCWSTR sid, Bundle& bundle) noexcept {
     Secret<BYTE, 32> mac;
     hr = Mac(bundle, mac.data());
     Record& record = bundle.record;
-    if (FAILED(hr) || !Equal(mac.data(), bundle.mac, 32) || record.magic != 0x5041544c || record.version != 3 ||
+    if (FAILED(hr) || !Equal(mac.data(), bundle.mac, 32) || record.magic != 0x5041544c || record.version != 4 ||
         record.iterations != HashIterations || record.attempts > 10 || record.disabled > 1 ||
         record.cipherBytes < 4 || record.cipherBytes > sizeof(record.cipher) || record.cipherBytes % 2 ||
         record.tpmMode > 1 ||
@@ -167,7 +167,7 @@ constexpr ULONGLONG kMaxPasswordAge = 0;
 
 HRESULT Check(Key& /*root*/, const Record& record) noexcept {
     const ULONGLONG now = Now();
-    if (record.attempts >= 10 || !record.passwordTime ||
+    if (record.disabled || record.attempts >= 10 || !record.passwordTime ||
         now < record.passwordTime || now < record.lastSeen ||
         (kMaxPasswordAge > 0 && now - record.passwordTime >= kMaxPasswordAge) ||
         now < record.until) {
@@ -226,7 +226,9 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
     Secret<BYTE, 32> aesKey;
     if (SUCCEEDED(hr)) hr = Random(aesKey.data(), 32);
     if (SUCCEEDED(hr) && tpm::Available()) {
-        HRESULT tpmHr = tpm::ProtectKey(sid, bundle.record.hash, aesKey.data(), bundle.record.tpmWrappedKey);
+        Secret<BYTE, 32> authorization;
+        HRESULT tpmHr = DeriveTpmAuthorization(pattern, bundle.record.salt, authorization.data());
+        if (SUCCEEDED(tpmHr)) tpmHr = tpm::ProtectKey(sid, authorization.data(), aesKey.data(), bundle.record.tpmWrappedKey);
         if (SUCCEEDED(tpmHr)) {
             bundle.record.tpmMode = 1;
         } else {
@@ -303,8 +305,11 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* sub
     // Resolve the AES decryption key.
     Secret<BYTE, 32> aesKey;
     if (bundle.record.tpmMode == 1) {
-        // Hardware rate-limiting: TPM unprotect requires the pattern hash as authorization.
-        hr = tpm::UnprotectKey(sid, hash.data(), bundle.record.tpmWrappedKey, aesKey.data());
+        // Use a separate derived authorization, not the persisted verifier.
+        // TPM authorization/anti-hammering enforcement still needs validation.
+        Secret<BYTE, 32> authorization;
+        hr = DeriveTpmAuthorization(pattern, bundle.record.salt, authorization.data());
+        if (SUCCEEDED(hr)) hr = tpm::UnprotectKey(sid, authorization.data(), bundle.record.tpmWrappedKey, aesKey.data());
         if (FAILED(hr)) return E_ACCESSDENIED;
     } else {
         CopyMemory(aesKey.data(), bundle.key, 32);
@@ -331,6 +336,8 @@ HRESULT FinishSubmission(PCWSTR sid, const BYTE submission[16]) noexcept {
     Lock lock; if (!lock.Acquire()) return E_ACCESSDENIED;
     Key root, user; HRESULT hr = OpenUser(sid, root, user); if (FAILED(hr)) return hr;
     Bundle bundle; hr = Read(user, sid, bundle); if (FAILED(hr)) return hr;
+    BYTE empty[16]{};
+    if (!submission || Equal(submission, empty, 16) || !Equal(submission, bundle.record.submission, 16)) return E_ACCESSDENIED;
     bundle.record.disabled = 0;
     bundle.record.attempts = 0;
     bundle.record.until = 0;
