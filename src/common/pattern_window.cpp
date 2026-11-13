@@ -2,6 +2,7 @@
 #include <windowsx.h>
 #include <algorithm>
 #include <cmath>
+#include <strsafe.h>
 
 namespace patlock {
 namespace {
@@ -22,6 +23,8 @@ struct State {
     POINT previous{};
     PatternVerifier verifier = nullptr;
     int hoverDot = -1;
+    POINT initialCursor{};
+    bool armed = false;
 };
 
 struct Layout {
@@ -36,11 +39,10 @@ Layout Grid(HWND window) noexcept {
     RECT r{};
     GetClientRect(window, &r);
     const int availableWidth = static_cast<int>(r.right);
-    const int availableHeight = static_cast<int>(r.bottom);
-    const int spacing = (std::max)(65, (std::min)(availableWidth - 90, availableHeight - 160) / 2);
+    const int spacing = 84;
     const int startX = availableWidth / 2 - spacing;
     const int startY = 100;
-    return {startX, startY, spacing, 14, 34};
+    return {startX, startY, spacing, 14, 32};
 }
 
 POINT Dot(Layout grid, int dot) noexcept {
@@ -113,10 +115,10 @@ void FinishPattern(HWND window, State& state) noexcept {
             InvalidateRect(window, nullptr, FALSE);
             SetTimer(window, 1, 1800, nullptr);
         } else {
-            // WrongPattern or general error: flash red for 900ms then auto-reset for retry
+            // WrongPattern: flash red for 800ms then auto-reset pattern for instant retry
             state.visual = VisualState::ErrorWrong;
             InvalidateRect(window, nullptr, FALSE);
-            SetTimer(window, 6, 900, nullptr);
+            SetTimer(window, 6, 800, nullptr);
         }
     } else {
         state.visual = VisualState::Success;
@@ -132,7 +134,14 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         SetWindowLongPtrW(window, DWLP_USER, lp);
         SetWindowTextW(window, L"Patlock - Pattern Sign-in");
 
-        // Enable Windows 11 Dark Mode on the window frame if supported
+        // Enable layered window style for translucent acrylic lock-screen integration
+        LONG_PTR exStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
+        SetWindowLongPtrW(window, GWL_EXSTYLE, exStyle | WS_EX_LAYERED);
+
+        // ~80% opacity: dark frosted glass letting blurred lock-screen wallpaper show through
+        SetLayeredWindowAttributes(window, 0, 205, LWA_ALPHA);
+
+        // Enable Windows 11 Rounded Corners and Dark Mode on window frame if supported
         HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
         if (dwm) {
             auto pfnDwmSetWindowAttribute = reinterpret_cast<HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD)>(
@@ -145,6 +154,22 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             }
             FreeLibrary(dwm);
         }
+
+        // Center window horizontally and place it naturally below the user avatar
+        int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+        int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+        int width = 340;
+        int height = 380;
+        int posX = (screenWidth - width) / 2;
+        int posY = (screenHeight - height) / 2 + 25;
+        SetWindowPos(window, HWND_TOP, posX, posY, width, height, SWP_SHOWWINDOW);
+
+        // Record initial cursor position so accidental mouse clicks when opening the tile do not start a dot
+        POINT cur{};
+        GetCursorPos(&cur);
+        ScreenToClient(window, &cur);
+        state->initialCursor = cur;
+        state->armed = false;
 
         if (!SetTimer(window, 1, 120000, nullptr)) EndDialog(window, -1);
         return TRUE;
@@ -215,6 +240,9 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         const POINT current = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         if (state->visual != VisualState::Drawing) return TRUE;
 
+        // Arm hover immediately on click
+        state->armed = true;
+
         // Tapping on last dot finishes pattern if valid
         if (state->dragging && state->pattern.Valid()) {
             FinishPattern(window, *state);
@@ -237,6 +265,17 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
     case WM_MOUSEMOVE: {
         const POINT current = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
         if (state->visual != VisualState::Drawing) return TRUE;
+
+        // Check if cursor has moved away from initial position before arming hover
+        if (!state->armed) {
+            const int dx = current.x - state->initialCursor.x;
+            const int dy = current.y - state->initialCursor.y;
+            if (dx * dx + dy * dy >= 144) { // moved at least 12 pixels intentionally
+                state->armed = true;
+            } else {
+                return TRUE;
+            }
+        }
 
         const Layout grid = Grid(window);
         if (!state->dragging) {
@@ -289,6 +328,18 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
     case WM_COMMAND:
         if (LOWORD(wp) == IDCANCEL) {
+            // When Esc is pressed:
+            // If user has drawn dots or is dragging: RESET current pattern, free cursor, remain in pattern mode!
+            if (state->pattern.count > 0 || state->dragging) {
+                state->pattern.Clear();
+                state->dragging = false;
+                state->visual = VisualState::Drawing;
+                state->hoverDot = -1;
+                ReleaseCapture();
+                InvalidateRect(window, nullptr, FALSE);
+                return TRUE;
+            }
+            // If pattern is already empty: close the grid and return to tile
             state->pattern.Clear();
             ReleaseCapture();
             EndDialog(window, IDCANCEL);
@@ -313,32 +364,48 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         HBITMAP memBmp = CreateCompatibleBitmap(hdc, rect.right, rect.bottom);
         HGDIOBJ oldBmp = SelectObject(dc, memBmp);
 
-        // Dark slate surface matching Windows 11 Fluent dark mode
-        HBRUSH bgBrush = CreateSolidBrush(RGB(22, 24, 30));
+        // Dark frosted acrylic background surface
+        HBRUSH bgBrush = CreateSolidBrush(RGB(18, 20, 26));
         FillRect(dc, &rect, bgBrush);
         DeleteObject(bgBrush);
         SetBkMode(dc, TRANSPARENT);
 
+        // Soft rounded acrylic border
+        HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(55, 60, 75));
+        HGDIOBJ prevBorderPen = SelectObject(dc, borderPen);
+        HGDIOBJ prevBorderBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+        RoundRect(dc, 0, 0, rect.right, rect.bottom, 22, 22);
+        SelectObject(dc, prevBorderPen);
+        SelectObject(dc, prevBorderBrush);
+        DeleteObject(borderPen);
+
         // Header typography (Segoe UI)
-        HFONT titleFont = CreateFontW(-19, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        HFONT titleFont = CreateFontW(-18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
         HFONT subFont = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
         HFONT hintFont = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
 
-        PCWSTR titleText = L"Sign in with Pattern";
-        PCWSTR subText = L"Glide across 5+ dots to unlock";
+        PCWSTR titleText = L"Pattern Sign-in";
+        wchar_t dynamicSub[64] = L"Glide across 5+ dots to unlock";
         COLORREF titleColor = RGB(245, 246, 250);
-        COLORREF subColor = RGB(155, 162, 178);
-        COLORREF lineColor = RGB(0, 165, 255);       // Electric cyan-blue
-        COLORREF ringColor = RGB(0, 165, 255);
-        COLORREF ringBgColor = RGB(16, 42, 75);
-        COLORREF coreColor = RGB(225, 245, 255);
+        COLORREF subColor = RGB(165, 172, 188);
+        COLORREF lineColor = RGB(0, 180, 255);       // Electric cyan-blue
+        COLORREF ringColor = RGB(0, 180, 255);
+        COLORREF ringBgColor = RGB(16, 45, 80);
+        COLORREF coreColor = RGB(235, 248, 255);
 
-        if (state->visual == VisualState::Success) {
+        if (state->visual == VisualState::Drawing) {
+            if (state->pattern.count > 0) {
+                StringCchPrintfW(dynamicSub, ARRAYSIZE(dynamicSub),
+                    state->pattern.count < 5 ? L"%zu dots connected (min 5)" : L"%zu dots connected - pause to sign in",
+                    state->pattern.count);
+                subColor = state->pattern.count < 5 ? RGB(100, 200, 255) : RGB(46, 213, 115);
+            }
+        } else if (state->visual == VisualState::Success) {
             titleText = L"Pattern Verified";
-            subText = L"Signing in...";
+            StringCchCopyW(dynamicSub, ARRAYSIZE(dynamicSub), L"Signing in...");
             titleColor = RGB(46, 213, 115);        // Emerald green
             subColor = RGB(160, 235, 190);
             lineColor = RGB(46, 213, 115);
@@ -347,7 +414,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             coreColor = RGB(230, 255, 235);
         } else if (state->visual == VisualState::ErrorWrong) {
             titleText = L"Incorrect Pattern";
-            subText = L"Please try again";
+            StringCchCopyW(dynamicSub, ARRAYSIZE(dynamicSub), L"Please try again");
             titleColor = RGB(255, 75, 75);         // Vivid coral-red
             subColor = RGB(255, 175, 175);
             lineColor = RGB(255, 75, 75);
@@ -356,7 +423,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             coreColor = RGB(255, 225, 230);
         } else if (state->visual == VisualState::ErrorTooShort) {
             titleText = L"Pattern Too Short";
-            subText = L"Connect at least 5 dots";
+            StringCchCopyW(dynamicSub, ARRAYSIZE(dynamicSub), L"Connect at least 5 dots");
             titleColor = RGB(255, 75, 75);
             subColor = RGB(255, 175, 175);
             lineColor = RGB(255, 75, 75);
@@ -365,7 +432,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             coreColor = RGB(255, 225, 230);
         } else if (state->visual == VisualState::ErrorLockout) {
             titleText = L"Pattern Locked Out";
-            subText = L"Too many attempts. Use Password.";
+            StringCchCopyW(dynamicSub, ARRAYSIZE(dynamicSub), L"Too many attempts. Use Password.");
             titleColor = RGB(255, 75, 75);
             subColor = RGB(255, 175, 175);
             lineColor = RGB(255, 75, 75);
@@ -375,16 +442,16 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         }
 
         // Render Title
-        RECT titleRect{0, 18, rect.right, 46};
+        RECT titleRect{0, 18, rect.right, 45};
         HGDIOBJ oldFont = SelectObject(dc, titleFont);
         SetTextColor(dc, titleColor);
         DrawTextW(dc, titleText, -1, &titleRect, DT_CENTER | DT_SINGLELINE);
 
         // Render Subtitle
-        RECT subRect{0, 48, rect.right, 74};
+        RECT subRect{0, 48, rect.right, 72};
         SelectObject(dc, subFont);
         SetTextColor(dc, subColor);
-        DrawTextW(dc, subText, -1, &subRect, DT_CENTER | DT_SINGLELINE);
+        DrawTextW(dc, dynamicSub, -1, &subRect, DT_CENTER | DT_SINGLELINE);
 
         const Layout grid = Grid(window);
 
@@ -431,7 +498,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 DeleteObject(cBrush);
             } else if (hovered) {
                 // Hovered Dot: subtle cyan highlight ring
-                HPEN hPen = CreatePen(PS_SOLID, 2, RGB(0, 165, 255));
+                HPEN hPen = CreatePen(PS_SOLID, 2, RGB(0, 180, 255));
                 HBRUSH hBrush = CreateSolidBrush(RGB(18, 48, 82));
                 HGDIOBJ oP = SelectObject(dc, hPen);
                 HGDIOBJ oB = SelectObject(dc, hBrush);
@@ -448,13 +515,13 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 DeleteObject(cBrush);
             } else {
                 // Unvisited Dot: dark halo + pearl center
-                HPEN uPen = CreatePen(PS_SOLID, 1, RGB(52, 58, 72));
-                HBRUSH uBrush = CreateSolidBrush(RGB(28, 31, 40));
+                HPEN uPen = CreatePen(PS_SOLID, 1, RGB(58, 64, 80));
+                HBRUSH uBrush = CreateSolidBrush(RGB(26, 30, 38));
                 HGDIOBJ oP = SelectObject(dc, uPen);
                 HGDIOBJ oB = SelectObject(dc, uBrush);
                 Ellipse(dc, p.x - 15, p.y - 15, p.x + 15, p.y + 15);
 
-                HBRUSH cBrush = CreateSolidBrush(RGB(175, 182, 195));
+                HBRUSH cBrush = CreateSolidBrush(RGB(185, 192, 208));
                 SelectObject(dc, cBrush);
                 Ellipse(dc, p.x - 5, p.y - 5, p.x + 5, p.y + 5);
 
@@ -469,8 +536,8 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         // Render Escape hint at bottom
         RECT footerRect{0, rect.bottom - 28, rect.right, rect.bottom - 8};
         SelectObject(dc, hintFont);
-        SetTextColor(dc, RGB(110, 116, 132));
-        DrawTextW(dc, L"Press Esc to cancel", -1, &footerRect, DT_CENTER | DT_SINGLELINE);
+        SetTextColor(dc, RGB(115, 122, 140));
+        DrawTextW(dc, L"Press Esc to reset pattern", -1, &footerRect, DT_CENTER | DT_SINGLELINE);
 
         if (prevPen) SelectObject(dc, prevPen);
         if (linePen) DeleteObject(linePen);
@@ -503,9 +570,10 @@ HRESULT DrawPatternInteractive(
     output.Clear();
     alignas(DWORD) BYTE buffer[sizeof(DLGTEMPLATE) + 3 * sizeof(WORD)]{};
     auto* dialog = reinterpret_cast<DLGTEMPLATE*>(buffer);
-    dialog->style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER;
-    dialog->cx = 280;
-    dialog->cy = 290;
+    // Frameless popup window
+    dialog->style = WS_POPUP;
+    dialog->cx = 240;
+    dialog->cy = 265;
     State state;
     state.hide = hideTrail;
     state.verifier = verifier;

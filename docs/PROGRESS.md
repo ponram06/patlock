@@ -12,6 +12,21 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Transparent Acrylic Lock-Screen UI, Accidental Start Guard & Esc Reset
+- Built:
+  - Transparent Acrylic Aesthetic: Frameless `WS_POPUP` window with `WS_EX_LAYERED` and 80% opacity (`LWA_ALPHA`), allowing the blurred Windows 11 lock screen wallpaper to show through with a dark frosted acrylic glass effect and native rounded corners (`DWMWCP_ROUND`).
+  - Accidental Start Prevention: Window records initial cursor coordinates on open and requires at least 12px of intentional mouse motion (or an explicit click) before hover-capture arms. This prevents dots directly under the cursor from accidentally capturing when the tile is clicked.
+  - Non-Destructive Esc Key Reset: Pressing `Esc` while drawing or after entering dots clears the pattern, frees mouse capture (`ReleaseCapture()`), and resets the dots to unvisited status without closing the window, allowing immediate re-drawing.
+  - Tile Cleanup: Hidden `SFI_CHECKBOX` and `SFI_SUBMIT_BUTTON` on the tile in `src/provider/common.h` to keep the lock screen uncluttered while the acrylic pattern grid auto-launches cleanly above "Sign-in options".
+  - Dynamic Subtitle Feedback: Shows real-time connected dot counts (e.g. `3 dots connected (min 5)` -> `5 dots connected - pause to sign in`) in bright cyan and green.
+  - Fixed C2280 build error in `src/provider/CSampleCredential.cpp` by directly referencing `decryptedPassword` in `patlock::Verify`.
+- Verified in VM by user:
+  - Phase 4 unlock previously verified.
+- Not verified yet:
+  - Live VM verification of transparent acrylic UI and arming guard.
+- Next step:
+  - User runs `update.cmd` in the VM to build and test the transparent lock screen grid.
+
 ### 2026-11-13: Professional End-to-End Android-Style UI & Auto-Popup on Tile Selection
 - Built:
   - Auto-Popup on Tile Selection: Selecting the Pattern tile under "Sign-in options" immediately schedules an asynchronous UI timer in `CSampleCredential::SetSelected` (60ms) that automatically pops up the 3x3 pattern window without the user touching or clicking "Draw pattern".
