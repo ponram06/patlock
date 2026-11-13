@@ -12,6 +12,18 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-14: Floating reference-style visual redesign
+- User supplied a cardless large-grid reference. Written: larger shared layout,
+  floating solid dots, restrained cyan feedback, transparent status, and native
+  owner-drawn fallback text with keyboard focus. HC retains system-colored surface.
+- Added active-window actual-cursor movement polling for transparent gaps without
+  changing verification/storage. Hover/timing/cancellation guards are preserved.
+- Verification: source/static review and whitespace checks only; no host builds,
+  screenshots, executable tests, provider install or registry changes performed.
+- VM action: FLOATING_UI.md; build/test/demo then reinstall DLL through existing
+  guarded steps. This visual update alone does not require re-enrollment.
+- Review repair: fallback text uses a subtle filled action surface so clicks on
+  whitespace/padding do not pass through the layered window.
 ### 2026-11-14: Restored requested hover-to-start input
 - User requested no-click/no-held-button drawing. Restored 120 ms stable hover
   start, button-free movement and 500 ms pause-to-submit after at least five dots.

@@ -1,6 +1,7 @@
 #include "pattern_window.h"
 #include "arming_gate.h"
 #include "hover_policy.h"
+#include "pattern_layout.h"
 #include <windows.h>
 #include <windowsx.h>
 #include <gdiplus.h>
@@ -17,11 +18,11 @@ namespace {
 constexpr COLORREF TransparentKey = RGB(1, 1, 1);
 
 // Layout constants
-constexpr int WindowW     = 280;
-constexpr int WindowH     = 292;
-constexpr int GridSpacing = 62;
-constexpr int GridTopY    = 80;    // Center Y of row 0 inside the card
-constexpr int HitRadius   = 28;
+constexpr int WindowW     = PatternLayout::Width;
+constexpr int WindowH     = PatternLayout::Height;
+constexpr int GridSpacing = PatternLayout::Spacing;
+constexpr int GridTopY    = PatternLayout::Top;
+constexpr int HitRadius   = PatternLayout::HitRadius;
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -47,6 +48,7 @@ struct State {
     VisualState visual = VisualState::Drawing;
     POINT previous{};
     POINT finishAnchor{};
+    POINT observedCursor{};
     PatternVerifier verifier = nullptr;
     RetryDelay retryDelay = nullptr;
     DWORD retrySeconds = 0;
@@ -88,8 +90,8 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
     contrast.cbSize = sizeof(contrast);
     if (!SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0)) return false;
     state.highContrast = (contrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
-    HBRUSH brush = CreateSolidBrush(state.highContrast ? GetSysColor(COLOR_WINDOW) : RGB(18, 22, 30));
-    HFONT font = CreateFontW(-static_cast<int>(14 * state.scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    HBRUSH brush = CreateSolidBrush(state.highContrast ? GetSysColor(COLOR_WINDOW) : TransparentKey);
+    HFONT font = CreateFontW(-static_cast<int>(16 * state.scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     if (!brush || !font) { if (brush) DeleteObject(brush); if (font) DeleteObject(font); return false; }
     SendMessageW(state.fallback, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
@@ -100,8 +102,12 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
     state.background = brush;
     auto scaled = [&state](int value) { return static_cast<int>(value * state.scale); };
     if (!SetWindowPos(window, HWND_TOP, x, y, w, h, SWP_NOACTIVATE) ||
-        !MoveWindow(state.status, scaled(12), scaled(16), scaled(256), scaled(34), TRUE) ||
-        !MoveWindow(state.fallback, scaled(32), scaled(244), scaled(216), scaled(30), TRUE)) return false;
+        !MoveWindow(state.status, scaled(12), scaled(2), scaled(WindowW - 24), scaled(30), TRUE) ||
+        !MoveWindow(state.fallback, scaled(40), scaled(PatternLayout::FallbackTop), scaled(WindowW - 80), scaled(PatternLayout::FallbackHeight), TRUE)) return false;
+    // High contrast uses an opaque system-colored surface; normal mode floats
+    // directly over the existing LogonUI background without sampling it.
+    if (!SetLayeredWindowAttributes(window, TransparentKey, state.highContrast ? 255 : 0,
+        state.highContrast ? LWA_ALPHA : LWA_COLORKEY)) return false;
     InvalidateRect(window, nullptr, TRUE);
     return true;
 }
@@ -191,6 +197,7 @@ void ResetStroke(HWND window, State& state) noexcept {
     POINT cursor{};
     if (!GetCursorPos(&cursor) || !ScreenToClient(window, &cursor)) { EndDialog(window, -1); return; }
     const Layout grid = Grid(window);
+    state.observedCursor = cursor;
     state.gate.Disarm(static_cast<int>(cursor.x / state.scale), static_cast<int>(cursor.y / state.scale),
         DotAt(window, cursor, grid.hitRadius) >= 0);
     UpdateStatus(window, state);
@@ -299,7 +306,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         if (!SetLayeredWindowAttributes(window, TransparentKey, 0, LWA_COLORKEY)) { EndDialog(window, -1); return TRUE; }
 
         state->fallback = CreateWindowExW(0, L"BUTTON", L"&Other sign-in options",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0,
             window, reinterpret_cast<HMENU>(IDCANCEL), nullptr, nullptr);
         state->status = CreateWindowExW(0, L"STATIC", L"Hover on a dot, then draw",
             WS_CHILD | WS_VISIBLE | SS_CENTER, 0, 0, 0, 0,
@@ -319,6 +326,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         }
 
         if (!SetTimer(window, 1, 120000, nullptr)) EndDialog(window, -1);
+        if (!SetTimer(window, 8, 30, nullptr)) EndDialog(window, -1);
         return FALSE; // Focus was explicitly assigned to the native fallback button.
     }
     if (!state) return FALSE;
@@ -329,6 +337,24 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
     switch (message) {
     case WM_TIMER:
+        if (wp == 8) {
+            // Color-keyed transparent areas pass mouse messages through. Sample
+            // actual cursor movement so generous hit targets still work there.
+            // Stationary samples do not reset inactivity or hover deadlines.
+            if (state->visual != VisualState::Drawing || GetActiveWindow() != window) return TRUE;
+            POINT current{}; RECT bounds{};
+            if (!GetCursorPos(&current) || !ScreenToClient(window, &current) || !GetClientRect(window, &bounds)) {
+                EndDialog(window, -1); return TRUE;
+            }
+            if (current.x != state->observedCursor.x || current.y != state->observedCursor.y) {
+                state->observedCursor = current;
+                if (state->dragging || PtInRect(&bounds, current)) {
+                    const WPARAM buttons = (GetKeyState(VK_LBUTTON) & 0x8000) ? MK_LBUTTON : 0;
+                    SendMessageW(window, WM_MOUSEMOVE, buttons, MAKELPARAM(current.x, current.y));
+                }
+            }
+            return TRUE;
+        }
         if (wp == 7) {
             if (!state->startDue) return TRUE;
             const UINT remaining = HoverPolicy::Remaining(GetTickCount64(), state->startDue);
@@ -429,7 +455,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
     case WM_DESTROY:
         if (state->font) { DeleteObject(state->font); state->font = nullptr; }
         if (state->background) { DeleteObject(state->background); state->background = nullptr; }
-        for (UINT_PTR id = 1; id <= 7; ++id) KillTimer(window, id);
+        for (UINT_PTR id = 1; id <= 8; ++id) KillTimer(window, id);
         return TRUE;
 
     case WM_ERASEBKGND:
@@ -469,6 +495,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
     case WM_MOUSEMOVE: {
         const POINT current = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        state->observedCursor = current;
 
         if (state->visual != VisualState::Drawing) return TRUE;
         const Layout grid = Grid(window);
@@ -552,11 +579,42 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
     case WM_CTLCOLORSTATIC:
         if (reinterpret_cast<HWND>(lp) == state->status) {
             HDC dc = reinterpret_cast<HDC>(wp);
-            SetTextColor(dc, state->highContrast ? GetSysColor(COLOR_WINDOWTEXT) : RGB(210, 218, 235));
-            SetBkColor(dc, state->highContrast ? GetSysColor(COLOR_WINDOW) : RGB(18, 22, 30));
+            SetTextColor(dc, state->highContrast ? GetSysColor(COLOR_WINDOWTEXT) : RGB(240, 243, 250));
+            SetBkMode(dc, TRANSPARENT);
             return reinterpret_cast<INT_PTR>(state->background);
         }
         break;
+
+    case WM_DRAWITEM: {
+        auto* item = reinterpret_cast<DRAWITEMSTRUCT*>(lp);
+        if (!item || item->hwndItem != state->fallback) return FALSE;
+        FillRect(item->hDC, &item->rcItem, state->background);
+        if (!state->highContrast) {
+            // A quiet pill preserves a real pointer hit area between glyphs.
+            // Fully color-keyed text padding would pass clicks through.
+            HGDIOBJ brush = SelectObject(item->hDC, GetStockObject(DC_BRUSH));
+            HGDIOBJ pen = SelectObject(item->hDC, GetStockObject(NULL_PEN));
+            const COLORREF previous = SetDCBrushColor(item->hDC,
+                (item->itemState & ODS_SELECTED) ? RGB(35, 48, 65) : RGB(22, 28, 38));
+            const int radius = static_cast<int>(14 * state->scale);
+            RoundRect(item->hDC, item->rcItem.left, item->rcItem.top, item->rcItem.right, item->rcItem.bottom, radius, radius);
+            SetDCBrushColor(item->hDC, previous);
+            if (pen) SelectObject(item->hDC, pen);
+            if (brush) SelectObject(item->hDC, brush);
+        }
+        SetBkMode(item->hDC, TRANSPARENT);
+        SetTextColor(item->hDC, state->highContrast ? GetSysColor(COLOR_WINDOWTEXT) :
+            ((item->itemState & ODS_SELECTED) ? RGB(180, 205, 235) : RGB(250, 250, 252)));
+        HGDIOBJ old = SelectObject(item->hDC, state->font);
+        RECT text = item->rcItem;
+        DrawTextW(item->hDC, L"&Other sign-in options", -1, &text,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | ((item->itemState & ODS_NOACCEL) ? DT_HIDEPREFIX : 0));
+        if ((item->itemState & ODS_FOCUS) && !(item->itemState & ODS_NOFOCUSRECT)) {
+            RECT focus = item->rcItem; InflateRect(&focus, -3, -3); DrawFocusRect(item->hDC, &focus);
+        }
+        if (old) SelectObject(item->hDC, old);
+        return TRUE;
+    }
 
     case WM_ACTIVATE:
         if (LOWORD(wp) == WA_INACTIVE && state->visual == VisualState::Drawing) ResetStroke(window, *state);
@@ -592,7 +650,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         }
 
         // 1) Fill outside with TransparentKey (outer margin)
-        HBRUSH keyBrush = CreateSolidBrush(TransparentKey);
+        HBRUSH keyBrush = CreateSolidBrush(state->highContrast ? GetSysColor(COLOR_WINDOW) : TransparentKey);
         const bool filled = keyBrush && FillRect(memDC, &physical, keyBrush);
         if (keyBrush) DeleteObject(keyBrush);
         if (!filled) {
@@ -606,15 +664,16 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
 
-            // Draw the existing rounded card, using system colors in high contrast.
-            Gdiplus::GraphicsPath cardPath;
-            AddRoundedRect(cardPath, Gdiplus::RectF(6.0f, 6.0f, rect.right - 12.0f, rect.bottom - 12.0f), 20.0f);
-
-            Gdiplus::SolidBrush cardBgBrush(Palette(*state, Gdiplus::Color(255, 18, 22, 30), COLOR_WINDOW));
-            g.FillPath(&cardBgBrush, &cardPath);
-
-            Gdiplus::Pen cardBorderPen(Palette(*state, Gdiplus::Color(160, 56, 64, 82), COLOR_WINDOWTEXT), 1.0f);
-            g.DrawPath(&cardBorderPen, &cardPath);
+            // Normal mode is a floating grid over the real LogonUI background.
+            // High contrast retains a solid system-colored reading surface.
+            if (state->highContrast) {
+                Gdiplus::GraphicsPath cardPath;
+                AddRoundedRect(cardPath, Gdiplus::RectF(6.0f, 6.0f, rect.right - 12.0f, rect.bottom - 12.0f), 20.0f);
+                Gdiplus::SolidBrush background(Palette(*state, Gdiplus::Color(), COLOR_WINDOW));
+                g.FillPath(&background, &cardPath);
+                Gdiplus::Pen border(Palette(*state, Gdiplus::Color(), COLOR_WINDOWTEXT), 1.0f);
+                g.DrawPath(&border, &cardPath);
+            }
 
             // ── Colors by state ──────────────────────────────────────────────
             Gdiplus::Color lineColor(255, 0, 170, 255);
@@ -637,7 +696,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             const Layout grid{WindowW / 2 - GridSpacing, GridTopY, GridSpacing, HitRadius};
 
             // ── Anti-Aliased Connecting Lines with Rounded Caps ──────────────
-            Gdiplus::Pen linePen(lineColor, 5.0f);
+            Gdiplus::Pen linePen(lineColor, 4.0f);
             linePen.SetStartCap(Gdiplus::LineCapRound);
             linePen.SetEndCap(Gdiplus::LineCapRound);
             linePen.SetLineJoin(Gdiplus::LineJoinRound);
@@ -683,18 +742,14 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                     Gdiplus::SolidBrush cb(Palette(*state, Gdiplus::Color(255, 210, 235, 255), COLOR_WINDOWTEXT));
                     g.FillEllipse(&cb, p.x - rIn, p.y - rIn, 2.0f * rIn, 2.0f * rIn);
                 } else {
-                    // Idle dot: clean, smooth solid dark circle
-                    float r = 12.0f;
-                    Gdiplus::SolidBrush dotBrush(Palette(*state, Gdiplus::Color(255, 34, 38, 50), COLOR_WINDOW));
+                    // Quiet solid dots, with a fine light edge for dark wallpapers.
+                    float r = 14.0f;
+                    Gdiplus::SolidBrush dotBrush(Palette(*state, Gdiplus::Color(255, 10, 14, 20), COLOR_WINDOW));
                     g.FillEllipse(&dotBrush, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
 
-                    Gdiplus::Pen dotRim(Palette(*state, Gdiplus::Color(255, 108, 122, 148), COLOR_WINDOWTEXT), 1.0f);
+                    Gdiplus::Pen dotRim(Palette(*state, Gdiplus::Color(160, 150, 165, 185), COLOR_WINDOWTEXT), 1.0f);
                     g.DrawEllipse(&dotRim, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
 
-                    // Small subtle pearl center pip
-                    float rPip = 2.5f;
-                    Gdiplus::SolidBrush pipBrush(Palette(*state, Gdiplus::Color(255, 175, 188, 211), COLOR_WINDOWTEXT));
-                    g.FillEllipse(&pipBrush, p.x - rPip, p.y - rPip, 2.0f * rPip, 2.0f * rPip);
                 }
             }
 

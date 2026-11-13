@@ -1,5 +1,9 @@
 # Pattern-window implementation and VM acceptance
 
+Current visual direction: see FLOATING_UI.md. Normal mode now uses a larger
+cardless floating grid and owner-drawn native text fallback; the original boxed
+surface description below is historical. High contrast retains an opaque surface.
+
 ## Current input update (2026-11-14)
 
 At the user's request, hover-to-start is restored: stable hover for 120 ms starts
