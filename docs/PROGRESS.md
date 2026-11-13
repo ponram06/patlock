@@ -12,6 +12,21 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Phase 5 source checkpoint; VM acceptance pending
+- Written: Platform Crypto Provider (`MS_PLATFORM_CRYPTO_PROVIDER`) integration for TPM 2.0
+  RSA-2048 key storage, pattern-derived usage authorization (`PCP_USAGEAUTH` / `NCRYPT_PIN_PROPERTY`),
+  RSA-OAEP key wrapping for the AES-256 password key, and graceful fallback to baseline mode when TPM is absent.
+- Escalating lockout policy (30s, 60s, 300s, 900s) and 10-failure disablement;
+  attempt reservation and durable registry flush before pattern hash evaluation.
+- Full-password rule enforced via volatile boot identity (`HKLM\SOFTWARE\Patlock\Boot\<SID>`)
+  and 24-hour freshness timer; stale password detection via constant-time `passwordMac` comparison in `Refresh`.
+- Fail-closed error handling and audit of provider logging (only fixed lifecycle message; zero secrets).
+- Record version bumped to 3 (adds `tpmMode`, `tpmWrappedKey`, `passwordMac`).
+- Expanded security unit tests in `tests/security_tests.cpp` to verify escalating delays,
+  memory wiping, and TPM availability detection. Wrote `docs/PHASE5_VM.md`.
+- Host status: source written, CMake and vcxproj updated. All VM runtime behavior, TPM integration,
+  lockout, and reboot freshness remain UNVERIFIED pending VM test pass.
+
 ### 2026-11-13: Phase 4 source checkpoint; VM acceptance pending
 - Written: pattern-to-password verification at submit time, local-account sample
   serialization, immediate plaintext cleanup and a persisted one-shot submission

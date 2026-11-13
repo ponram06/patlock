@@ -1,8 +1,8 @@
-# Baseline record and password-refresh implementation
+# Record format, TPM hardening, and password-refresh implementation
 
-Current mode: baseline only. This is convenience authentication, not stronger
-than a Windows password. BitLocker/device encryption is a prerequisite. An
-administrator/SYSTEM process can read the random AES key and recover the password.
+Current modes:
+- **TPM-hardened (primary when TPM available)**: AES-256 key is wrapped with RSA-2048 OAEP via the Microsoft Platform Crypto Provider (`MS_PLATFORM_CRYPTO_PROVIDER`). The TPM key's usage authorization is bound to the pattern hash (`PCP_USAGEAUTH`). Guessing is rate-limited by the TPM's hardware anti-hammering logic.
+- **Baseline (fallback)**: When no TPM is detected, random 256-bit AES key is stored in the SYSTEM/Administrators-only registry store. BitLocker/device encryption is a prerequisite.
 
 The elevated native C++ tool uses a nonpersistent credential prompt, validates
 the unqualified local account password with LogonUserW, and obtains the SID from
@@ -13,8 +13,9 @@ No account name, password or pattern is accepted on the command line.
 Each SID has one REG_BINARY record under the 64-bit HKLM\SOFTWARE\Patlock key.
 Root and account keys use a protected DACL granting only SYSTEM and Administrators
 full access. Opening a key reapplies that DACL before reading a secret. The
-version-2 record contains a random 256-bit key, account identity, PBKDF2 salt and
-hash, AES-GCM ciphertext/nonce/tag, attempt state, freshness and an HMAC over the
+version-3 record contains a random 256-bit HMAC key, account identity, PBKDF2 salt and
+hash, AES-GCM ciphertext/nonce/tag, `tpmMode` flag, `tpmWrappedKey` (256 bytes for RSA-OAEP),
+`passwordMac` (HMAC-SHA256 of enrolled password), attempt state, freshness and an HMAC over the
 record. It is a fixed C++ layout for this build, not a general interchange format.
 Unknown size/version, invalid bounds, changed SID or bad MAC decline the tile.
 

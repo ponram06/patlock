@@ -38,9 +38,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         if (SUCCEEDED(hr)) hr = patlock::Enroll(user, sid, password.data(), first);
     }
     password.Clear();
-    MessageBoxW(nullptr, SUCCEEDED(hr)
-        ? L"Saved in baseline mode. Password verification is valid for this boot and up to 24 hours."
-        : L"No usable change was saved. Check the local account/password, pattern confirmation and elevation. A stale or corrupt record requires re-enrollment.",
-        L"Patlock", MB_OK | (SUCCEEDED(hr) ? MB_ICONINFORMATION : MB_ICONERROR));
+    if (SUCCEEDED(hr)) {
+        const bool isTpm = (patlock::QueryTpmMode(sid) == S_OK);
+        const wchar_t* modeMsg = isTpm
+            ? L"Saved in TPM-hardened mode (Platform Crypto Provider).\nPassword verification is valid for this boot and up to 24 hours."
+            : L"Saved in baseline mode (software store).\nPassword verification is valid for this boot and up to 24 hours.";
+        MessageBoxW(nullptr, modeMsg, L"Patlock", MB_OK | MB_ICONINFORMATION);
+    } else {
+        MessageBoxW(nullptr,
+            L"No usable change was saved. Check the local account/password, pattern confirmation and elevation. A stale or corrupt record requires re-enrollment.",
+            L"Patlock", MB_OK | MB_ICONERROR);
+    }
     return FAILED(hr) ? 1 : 0;
 }
