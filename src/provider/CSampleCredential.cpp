@@ -16,16 +16,18 @@
 #include "CSampleCredential.h"
 #include "guid.h"
 #include "pattern_window.h"
+#include "security.h"
 
 CSampleCredential::CSampleCredential():
     _cRef(1),
-    _pCredProvCredentialEvents(nullptr),
+    _cpus(CPUS_INVALID),
     _pszUserSid(nullptr),
     _pszQualifiedUserName(nullptr),
-    _fIsLocalUser(false),
+    _pCredProvCredentialEvents(nullptr),
     _fChecked(false),
+    _dwComboIndex(0),
     _fShowControls(false),
-    _dwComboIndex(0)
+    _fIsLocalUser(false)
 {
     DllAddRef();
 
@@ -468,8 +470,10 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID)
     if (FAILED(hr) || !owner) return E_FAIL;
     patlock::Pattern pattern;
     hr = patlock::DrawPattern(HINST_THISDLL, owner, _fChecked != FALSE, pattern);
+    if (hr == S_OK) hr = patlock::Verify(_pszUserSid, pattern);
     pattern.Clear();
-    if (hr == S_OK) MessageBoxW(owner, L"Pattern captured. Authentication is not enabled in this phase.", L"Pattern", MB_OK);
+    if (hr == S_OK) MessageBoxW(owner, L"Pattern verified. Windows authentication is not enabled in this phase.", L"Pattern", MB_OK);
+    else if (FAILED(hr)) MessageBoxW(owner, L"Pattern declined. Wait for any lockout, or sign in with Password and run Patlock password refresh.", L"Pattern", MB_OK | MB_ICONWARNING);
     return FAILED(hr) ? hr : S_OK;
 }
 

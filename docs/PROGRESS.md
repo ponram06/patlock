@@ -12,6 +12,17 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Phase 3 source checkpoint; VM acceptance pending
+- Written: native C++ elevated enrollment and password-refresh tool; local-account
+  validation, double drawing, PBKDF2-HMAC-SHA256, SID-bound AES-GCM records,
+  protected HKLM DACL, record HMAC, persistent serialized attempt updates and
+  password freshness bound to a volatile boot identity.
+- Encryption is present when the record is first created so no interim plaintext
+  password format is introduced. Windows credential submission remains disabled.
+- Wrote crypto/policy tests; not executed. See PHASE3_VM.md for each enrollment,
+  ACL, lockout, reboot and corruption acceptance case. See STORAGE.md for design.
+- No host builds, registry writes, enrollment or runtime testing performed.
+
 ### 2026-11-13: Phase 2 source checkpoint; VM acceptance pending
 - Written: shared modal 3x3 pattern window, fixed-size wiped pattern buffer,
   five-dot minimum, midpoint insertion, segment hit testing, hide trail,

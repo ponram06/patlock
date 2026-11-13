@@ -28,6 +28,14 @@ struct Pattern final {
         }
         dots[count++] = dot;
     }
-    bool Valid() const noexcept { return count >= MinimumDots && count <= dots.size(); }
+    bool Valid() const noexcept {
+        if (count < MinimumDots || count > dots.size()) return false;
+        unsigned seen = 0;
+        for (size_t i = 0; i < count; ++i) {
+            if (dots[i] > 8 || (seen & (1u << dots[i]))) return false;
+            seen |= 1u << dots[i];
+        }
+        return true;
+    }
 };
 }
