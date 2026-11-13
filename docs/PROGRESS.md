@@ -12,6 +12,20 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Phase 2 source checkpoint; VM acceptance pending
+- Written: shared modal 3x3 pattern window, fixed-size wiped pattern buffer,
+  five-dot minimum, midpoint insertion, segment hit testing, hide trail,
+  cancellation, standalone demo and pattern-rule test executable.
+- Provider uses its own GUID and obtains the dialog owner with OnCreatingWindow.
+  Credential serialization remains gated off; this checkpoint cannot unlock.
+- Tests written but NOT executed; builds and runtime checks are VM-only.
+  See PHASE2_VM.md for desktop, lock-screen and sign-in-screen cases.
+- The user approved explicit Patlock password re-verification. No inference
+  from built-in Password/PIN/Hello events will be used.
+- Phase 1 review findings addressed: temporary password wipes, resource include
+  path, uninstall ownership checks and failed-install DLL cleanup. Static review
+  does not establish runtime behavior. All VM acceptance remains pending.
+
 ### 2026-11-13: Phase 1 implementation checkpoint; not accepted
 - Written: Microsoft's V2 CredentialProvider source at pinned revision
   `434f6002bdf9cf9829406c3ff2b33387982d6168`, upstream license/provenance,
@@ -29,10 +43,10 @@ Update after every session. Keep it honest: separate "written" from "verified on
   pattern authentication, persistent lockout, full-password freshness, TPM,
   packaging acceptance and hardware tuning.
 - Design blocker: PASSWORD_REFRESH_DECISION.md describes the proposed explicit
-  password re-verification change. Approval is needed before changing PLAN.md.
+  password re-verification change. The user approved it on 2026-11-13.
 - Publishing: the requested GitHub repository could not be read using
   noninteractive Git credentials. No remote synchronization has been verified.
-- Next step: resolve that design decision and GitHub authentication; run the
+- Next step: implement the approved decision and resolve GitHub authentication; run the
   Phase 1 VM checklist. Do not confuse a local commit with a successful push.
 
 ### Phase 0: done

@@ -1,6 +1,9 @@
 # Approval needed: proving a full-password login
 
-Status: proposal only, 2026-11-13. PLAN.md has not been changed.
+Status: approved by the user on 2026-11-13: "Approve explicit Patlock password verification".
+Implementation choice: elevated desktop enrollment tool with a separate refresh
+action; built-in Password sign-in remains untouched. The implementation can now
+update PLAN.md and tests to match this behavior.
 
 PLAN.md sections 5 and 8 require a full password after restart, after 24 hours,
 and after repeated pattern failures. TESTING.md further requires that use of the

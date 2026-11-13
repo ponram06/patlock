@@ -11,8 +11,8 @@ if (-not $SnapshotAndPasswordFallbackVerified) {
     throw 'Take a snapshot and verify a second administrator Password login, then pass -SnapshotAndPasswordFallbackVerified.'
 }
 $source = (Resolve-Path -LiteralPath $DllPath).Path
-$destination = Join-Path $env:SystemRoot 'System32/SampleV2CredentialProvider.dll'
-$clsid = '{5fd3d285-0dd9-4362-8855-e0abaacd4af6}'
+$destination = Join-Path $env:SystemRoot 'System32/PatlockProvider.dll'
+$clsid = '{21d42e91-a8c0-4e63-b5d7-372d8585982c}'
 $providerKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$clsid"
 $classKey = "HKLM:\SOFTWARE\Classes\CLSID\$clsid"
 if ((Test-Path -LiteralPath $destination) -or (Test-Path -LiteralPath $providerKey) -or (Test-Path -LiteralPath $classKey)) {
@@ -42,12 +42,12 @@ try {
         New-Item -Path $logPath -ItemType File | Out-Null
     }
     New-Item -Path "$classKey\InprocServer32" -Force | Out-Null
-    Set-Item -LiteralPath $classKey -Value 'Patlock Phase 1 Microsoft sample'
+    Set-Item -LiteralPath $classKey -Value 'Patlock Pattern Provider'
     Set-Item -LiteralPath "$classKey\InprocServer32" -Value $destination
     New-ItemProperty -LiteralPath "$classKey\InprocServer32" -Name ThreadingModel -Value Apartment -PropertyType String | Out-Null
     # Register the tile last. No provider filter or built-in provider is touched.
     New-Item -Path $providerKey -Force | Out-Null
-    Set-Item -LiteralPath $providerKey -Value 'Patlock Phase 1 Microsoft sample'
+    Set-Item -LiteralPath $providerKey -Value 'Patlock Pattern Provider'
 } catch {
     # Disable enumeration first if registration was incomplete.
     Remove-Item -LiteralPath $providerKey -Recurse -Force -ErrorAction SilentlyContinue
@@ -55,7 +55,7 @@ try {
     if ($copied) {
         Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $destination) {
-            Write-Warning 'Registration failed; reboot the VM and remove System32/SampleV2CredentialProvider.dll before retrying.'
+            Write-Warning 'Registration failed; reboot the VM and remove System32/PatlockProvider.dll before retrying.'
         }
     }
     throw

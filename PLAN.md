@@ -49,7 +49,9 @@ fallback if the spike in section 11 fails, or for a later freehand mode.
 - Generous hit radius (about a quarter of the cell width) because trackpad acceleration makes aiming harder.
 - Input: press-and-hold or tap-and-drag; consider a hover-style start. Optional hide-trail setting.
 - Lockout: 5 wrong -> 30 s; then 1, 5, 15 min; about 10 wrong -> Pattern disabled until full password login. Persisted across reboots.
-- Full password required after every restart and after 24 h without one.
+- Explicit full-password verification through Patlock is required after every restart and after 24 h without it.
+  Approved 2026-11-13: use the elevated desktop enrollment tool's refresh flow after signing in with the built-in Password tile.
+  Built-in Password/PIN/Hello sign-ins alone do not reset Patlock state. Never infer password use from a session event.
 
 ## 6. Secure storage
 Stored: salt + PBKDF2 hash of the pattern; encrypted password; attempt counter; lockout time; last full-password time; account name; format version.

@@ -43,7 +43,7 @@ Done when: in the VM, Win+L then pattern unlocks; after restart (and full passwo
 
 ## Phase 5: Hardening
 Tasks:
-- Escalating lockout (30 s, 1, 5, 15 min); disable Pattern after about 10 failures until a full-password login.
+- Escalating lockout (30 s, 1, 5, 15 min); disable Pattern after about 10 failures until explicit Patlock password verification.
 - Full password required after restart and after 24 h.
 - TPM-backed key with pattern-derived authorization where available; fallback to baseline otherwise.
 - Fail-closed error handling everywhere in the provider; verify no secrets in logs; hide-trail option.

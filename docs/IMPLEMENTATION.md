@@ -49,5 +49,7 @@ evidence. PLAN.md changes still require approval under AGENTS.md.
 - Phase 1: source and VM scripts written; static inspection only. No builds or
   VM tests have been run. Full acceptance remains pending.
 - Noninteractive GitHub access failed because Git could not obtain credentials.
-- Password freshness design decision is pending in PASSWORD_REFRESH_DECISION.md.
-  Do not silently implement a substitute for built-in Password login detection.
+- Password freshness proposal in PASSWORD_REFRESH_DECISION.md was explicitly
+  approved. Use the desktop tool's password refresh operation.
+- Phase 1 local commit: 0031fb4. Push attempted and failed for authentication.
+- Phase 2: source written; VM tests pending. See PHASE2_VM.md.

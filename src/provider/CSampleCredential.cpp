@@ -15,6 +15,7 @@
 #include <unknwn.h>
 #include "CSampleCredential.h"
 #include "guid.h"
+#include "pattern_window.h"
 
 CSampleCredential::CSampleCredential():
     _cRef(1),
@@ -35,6 +36,7 @@ CSampleCredential::CSampleCredential():
 
 CSampleCredential::~CSampleCredential()
 {
+    UnAdvise();
     if (_rgFieldStrings[SFI_PASSWORD])
     {
         size_t lenPassword = wcslen(_rgFieldStrings[SFI_PASSWORD]);
@@ -77,11 +79,11 @@ HRESULT CSampleCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
     // Initialize the String value of all the fields.
     if (SUCCEEDED(hr))
     {
-        hr = SHStrDupW(L"Sample Credential", &_rgFieldStrings[SFI_LABEL]);
+        hr = SHStrDupW(L"Pattern", &_rgFieldStrings[SFI_LABEL]);
     }
     if (SUCCEEDED(hr))
     {
-        hr = SHStrDupW(L"Sample Credential Provider", &_rgFieldStrings[SFI_LARGE_TEXT]);
+        hr = SHStrDupW(L"Pattern", &_rgFieldStrings[SFI_LARGE_TEXT]);
     }
     if (SUCCEEDED(hr))
     {
@@ -97,7 +99,7 @@ HRESULT CSampleCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
     }
     if (SUCCEEDED(hr))
     {
-        hr = SHStrDupW(L"Checkbox", &_rgFieldStrings[SFI_CHECKBOX]);
+        hr = SHStrDupW(L"Hide trail", &_rgFieldStrings[SFI_CHECKBOX]);
     }
     if (SUCCEEDED(hr))
     {
@@ -105,7 +107,7 @@ HRESULT CSampleCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
     }
     if (SUCCEEDED(hr))
     {
-        hr = SHStrDupW(L"Launch helper window", &_rgFieldStrings[SFI_LAUNCHWINDOW_LINK]);
+        hr = SHStrDupW(L"Draw pattern", &_rgFieldStrings[SFI_LAUNCHWINDOW_LINK]);
     }
     if (SUCCEEDED(hr))
     {
@@ -175,9 +177,11 @@ HRESULT CSampleCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
 // LogonUI calls this in order to give us a callback in case we need to notify it of anything.
 HRESULT CSampleCredential::Advise(_In_ ICredentialProviderCredentialEvents *pcpce)
 {
+    if (!pcpce) return E_POINTER;
     if (_pCredProvCredentialEvents != nullptr)
     {
         _pCredProvCredentialEvents->Release();
+        _pCredProvCredentialEvents = nullptr;
     }
     return pcpce->QueryInterface(IID_PPV_ARGS(&_pCredProvCredentialEvents));
 }
@@ -210,6 +214,7 @@ HRESULT CSampleCredential::SetSelected(_Out_ BOOL *pbAutoLogon)
 // is to clear out the password field.
 HRESULT CSampleCredential::SetDeselected()
 {
+    _patternReady = false;
     HRESULT hr = S_OK;
     if (_rgFieldStrings[SFI_PASSWORD])
     {
@@ -456,50 +461,16 @@ HRESULT CSampleCredential::SetComboBoxSelectedValue(DWORD dwFieldID, DWORD dwSel
 // Called when the user clicks a command link.
 HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID)
 {
-    HRESULT hr = S_OK;
-
-    CREDENTIAL_PROVIDER_FIELD_STATE cpfsShow = CPFS_HIDDEN;
-
-    // Validate parameter.
-    if (dwFieldID < ARRAYSIZE(_rgCredProvFieldDescriptors) &&
-        (CPFT_COMMAND_LINK == _rgCredProvFieldDescriptors[dwFieldID].cpft))
-    {
-        HWND hwndOwner = nullptr;
-        switch (dwFieldID)
-        {
-        case SFI_LAUNCHWINDOW_LINK:
-            if (_pCredProvCredentialEvents)
-            {
-                _pCredProvCredentialEvents->OnCreatingWindow(&hwndOwner);
-            }
-
-            // Pop a messagebox indicating the click.
-            ::MessageBox(hwndOwner, L"Command link clicked", L"Click!", 0);
-            break;
-        case SFI_HIDECONTROLS_LINK:
-            _pCredProvCredentialEvents->BeginFieldUpdates();
-            cpfsShow = _fShowControls ? CPFS_DISPLAY_IN_SELECTED_TILE : CPFS_HIDDEN;
-            _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_FULLNAME_TEXT, cpfsShow);
-            _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_DISPLAYNAME_TEXT, cpfsShow);
-            _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_LOGONSTATUS_TEXT, cpfsShow);
-            _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_CHECKBOX, cpfsShow);
-            _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_EDIT_TEXT, cpfsShow);
-            _pCredProvCredentialEvents->SetFieldState(nullptr, SFI_COMBOBOX, cpfsShow);
-            _pCredProvCredentialEvents->SetFieldString(nullptr, SFI_HIDECONTROLS_LINK, _fShowControls? L"Hide additional controls" : L"Show additional controls");
-            _pCredProvCredentialEvents->EndFieldUpdates();
-            _fShowControls = !_fShowControls;
-            break;
-        default:
-            hr = E_INVALIDARG;
-        }
-
-    }
-    else
-    {
-        hr = E_INVALIDARG;
-    }
-
-    return hr;
+    if (dwFieldID != SFI_LAUNCHWINDOW_LINK || !_pCredProvCredentialEvents) return E_INVALIDARG;
+    _patternReady = false;
+    HWND owner = nullptr;
+    HRESULT hr = _pCredProvCredentialEvents->OnCreatingWindow(&owner);
+    if (FAILED(hr) || !owner) return E_FAIL;
+    patlock::Pattern pattern;
+    hr = patlock::DrawPattern(HINST_THISDLL, owner, _fChecked != FALSE, pattern);
+    pattern.Clear();
+    if (hr == S_OK) MessageBoxW(owner, L"Pattern captured. Authentication is not enabled in this phase.", L"Pattern", MB_OK);
+    return FAILED(hr) ? hr : S_OK;
 }
 
 // Collect the username and password into a serialized credential for the correct usage scenario
@@ -515,6 +486,9 @@ HRESULT CSampleCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIAL
     *ppwszOptionalStatusText = nullptr;
     *pcpsiOptionalStatusIcon = CPSI_NONE;
     ZeroMemory(pcpcs, sizeof(*pcpcs));
+    // A captured pattern alone is never a credential.
+    if (!_patternReady) return S_OK;
+    _patternReady = false;
 
     // For local user, the domain and user name can be split from _pszQualifiedUserName (domain\username).
     // CredPackAuthenticationBuffer() cannot be used because it won't work with unlock scenario.

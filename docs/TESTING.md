@@ -27,12 +27,12 @@ Run in the Windows 11 VM first (take a snapshot before each install). Tick each 
 ## Lockout
 - [ ] 5 wrong attempts triggers a 30 s delay; delays escalate
 - [ ] Lockout state survives reboot
-- [ ] After about 10 failures Pattern is disabled until full password login
-- [ ] Counter clears after a full password login
+- [ ] After about 10 failures Pattern is disabled until explicit Patlock password verification
+- [ ] Counter clears after explicit Patlock password verification
 
 ## Full-password rule
-- [ ] Pattern hidden after a restart until the password is used once
-- [ ] Pattern hidden after the time limit without a password login
+- [ ] Pattern hidden after a restart until explicit Patlock password verification
+- [ ] Pattern hidden after the time limit without explicit Patlock password verification
 
 ## Failure handling (Password option must still work in every case)
 - [ ] Windows password changed after enrollment

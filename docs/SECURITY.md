@@ -30,6 +30,9 @@ Hardened:
 - Fall back to baseline if no TPM. Document which mode is active.
 
 ## Rules for code
+- Approved password freshness flow: the elevated desktop enrollment tool
+  explicitly verifies the local account's password to refresh eligibility.
+  Built-in Password, PIN and Hello sign-ins alone do not reset Patlock state.
 - Never log the pattern, password, keys, salts-with-secrets, or decrypted data.
 - SecureZeroMemory all sensitive buffers right after use; avoid copying them into std::string where it can be avoided.
 - Constant-time comparison for hashes and tags.

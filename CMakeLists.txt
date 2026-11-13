@@ -7,8 +7,19 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+add_library(patlock_common STATIC src/common/pattern_window.cpp)
+target_include_directories(patlock_common PUBLIC src/common)
+target_compile_definitions(patlock_common PUBLIC UNICODE _UNICODE NOMINMAX)
+target_compile_options(patlock_common PRIVATE /W4 /sdl)
+target_link_libraries(patlock_common PUBLIC user32 gdi32)
+add_executable(pattern_window_demo WIN32 src/tools/pattern_window_demo/main.cpp)
+target_link_libraries(pattern_window_demo PRIVATE patlock_common)
+enable_testing()
+add_executable(pattern_tests tests/pattern_tests.cpp)
+target_link_libraries(pattern_tests PRIVATE patlock_common)
+add_test(NAME pattern_rules COMMAND pattern_tests)
 
-add_library(SampleV2CredentialProvider SHARED
+add_library(PatlockProvider SHARED
     src/provider/CSampleCredential.cpp
     src/provider/CSampleProvider.cpp
     src/provider/Dll.cpp
@@ -16,8 +27,8 @@ add_library(SampleV2CredentialProvider SHARED
     src/provider/helpers.cpp
     src/provider/resources.rc
     src/provider/samplev2credentialprovider.def)
-target_compile_definitions(SampleV2CredentialProvider PRIVATE UNICODE _UNICODE WIN32 _WINDOWS)
-target_include_directories(SampleV2CredentialProvider PRIVATE src/provider)
-target_compile_options(SampleV2CredentialProvider PRIVATE /W4 /sdl /guard:cf)
-target_link_options(SampleV2CredentialProvider PRIVATE /DYNAMICBASE /NXCOMPAT /guard:cf)
-target_link_libraries(SampleV2CredentialProvider PRIVATE credui shlwapi secur32)
+target_compile_definitions(PatlockProvider PRIVATE UNICODE _UNICODE WIN32 _WINDOWS)
+target_include_directories(PatlockProvider PRIVATE src/provider)
+target_compile_options(PatlockProvider PRIVATE /W4 /sdl /guard:cf)
+target_link_options(PatlockProvider PRIVATE /DYNAMICBASE /NXCOMPAT /guard:cf)
+target_link_libraries(PatlockProvider PRIVATE patlock_common credui shlwapi secur32)
