@@ -24,9 +24,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         CREDUI_FLAGS_GENERIC_CREDENTIALS | CREDUI_FLAGS_ALWAYS_SHOW_UI | CREDUI_FLAGS_DO_NOT_PERSIST | CREDUI_FLAGS_EXCLUDE_CERTIFICATES);
     if (prompt == ERROR_CANCELLED) return 0;
     HRESULT hr = HRESULT_FROM_WIN32(prompt);
+    PCWSTR cleanUser = wcsrchr(user, L'\\') ? wcsrchr(user, L'\\') + 1 : user;
     wchar_t sid[184]{};
-    if (SUCCEEDED(hr)) hr = patlock::ValidatePassword(user, password.data(), sid);
-    if (SUCCEEDED(hr) && refresh) hr = patlock::Refresh(user, sid, password.data());
+    if (SUCCEEDED(hr)) hr = patlock::ValidatePassword(cleanUser, password.data(), sid);
+    if (SUCCEEDED(hr) && refresh) hr = patlock::Refresh(cleanUser, sid, password.data());
     if (SUCCEEDED(hr) && !refresh) {
         patlock::Pattern first, second;
         hr = patlock::DrawPattern(instance, nullptr, false, first);
@@ -35,7 +36,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         hr = patlock::DrawPattern(instance, nullptr, false, second);
         if (hr != S_OK) return FAILED(hr) ? 1 : 0;
         if (first.count != second.count || !patlock::Equal(first.dots.data(), second.dots.data(), first.count)) hr = E_INVALIDARG;
-        if (SUCCEEDED(hr)) hr = patlock::Enroll(user, sid, password.data(), first);
+        if (SUCCEEDED(hr)) hr = patlock::Enroll(cleanUser, sid, password.data(), first);
     }
     password.Clear();
     if (SUCCEEDED(hr)) {
@@ -45,9 +46,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
             : L"Saved in baseline mode (software store).\nPassword verification is valid for this boot and up to 24 hours.";
         MessageBoxW(nullptr, modeMsg, L"Patlock", MB_OK | MB_ICONINFORMATION);
     } else {
-        MessageBoxW(nullptr,
-            L"No usable change was saved. Check the local account/password, pattern confirmation and elevation. A stale or corrupt record requires re-enrollment.",
-            L"Patlock", MB_OK | MB_ICONERROR);
+        wchar_t errorMsg[512];
+        if (hr == HRESULT_FROM_WIN32(ERROR_LOGON_FAILURE)) {
+            StringCchPrintfW(errorMsg, ARRAYSIZE(errorMsg),
+                L"Windows rejected the password for '%s'.\n\n"
+                L"If '1684' is a Windows Hello PIN, note that Windows PINs cannot be used here.\n"
+                L"Set an actual local password in elevated CMD with:\n"
+                L"  net user %s 1684",
+                cleanUser, cleanUser);
+        } else if (hr == E_INVALIDARG) {
+            StringCchPrintfW(errorMsg, ARRAYSIZE(errorMsg),
+                L"Invalid input or mismatched pattern confirmation.\n"
+                L"Pattern must connect at least 5 dots and match exactly on both draws.");
+        } else {
+            StringCchPrintfW(errorMsg, ARRAYSIZE(errorMsg),
+                L"No usable change was saved (error 0x%08X).\n"
+                L"Check the account name, password, pattern confirmation, and elevation.",
+                hr);
+        }
+        MessageBoxW(nullptr, errorMsg, L"Patlock", MB_OK | MB_ICONERROR);
     }
     return FAILED(hr) ? 1 : 0;
 }
