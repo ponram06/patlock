@@ -12,6 +12,27 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Professional End-to-End Android-Style UI & Auto-Popup on Tile Selection
+- Built:
+  - Auto-Popup on Tile Selection: Selecting the Pattern tile under "Sign-in options" immediately schedules an asynchronous UI timer in `CSampleCredential::SetSelected` (60ms) that automatically pops up the 3x3 pattern window without the user touching or clicking "Draw pattern".
+  - Commercial Windows 11 Dark Fluent UI:
+    - Enabled DWM immersive dark mode and Windows 11 rounded window corners (`DWMWCP_ROUND`).
+    - Velvet dark slate surface (`RGB(22, 24, 30)`), crisp anti-aliased Segoe UI typography with clear hierarchy (Title, Subtitle, and Escape hint).
+    - Multi-layered glowing dot aesthetics: dark halos with pearl core when inactive, glowing accent halo on hover, and vibrant electric blue outer ring with solid white core when connected.
+    - Smooth 6px electric cyan connecting lines and live rubber-band trail with rounded end-caps and rounded corner joins (`PS_ENDCAP_ROUND | PS_JOIN_ROUND`).
+  - Android-Style In-Window Verification & Error Feedback:
+    - Added `DrawPatternInteractive` with instant verifier callback.
+    - Correct pattern: turns emerald green (`RGB(46, 213, 115)`), confirms "Pattern Verified", and signs in automatically.
+    - Incorrect pattern: flashes vivid coral-red (`RGB(255, 75, 75)`), displays "Incorrect Pattern. Please try again", and auto-clears after 900ms for immediate retry without closing the window or showing message boxes.
+    - Lockout: displays "Pattern Locked Out. Use Password." and gracefully closes.
+  - Effortless Glide-to-Draw: 34px hit radius captures hover entry near any dot instantly, auto-starts tracking with capture, and finishes on 350ms pause on last dot or tap.
+- Verified in VM by user:
+  - Previous Phase 4 unlock verified on Windows 11 lock screen with pattern and password fallback.
+- Not verified yet:
+  - Live VM verification of auto-popup on Sign-in option click and new Fluent dark UI.
+- Next step:
+  - User pulls latest commits and runs `update.cmd` in the VM to test the end-to-end professional UI.
+
 ### 2026-11-13: Trackpad Glide Mode, Live Rubber-Band Trail & Asynchronous Auto-Login
 - Built:
   - Live rubber-band line in `src/common/pattern_window.cpp` following the mouse/finger from the last captured dot to current cursor coordinates in real time.

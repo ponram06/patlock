@@ -104,6 +104,8 @@ public:
 
   private:
 
+    static VOID CALLBACK AutoLaunchTimerCallback(HWND, UINT, UINT_PTR, DWORD);
+    UINT_PTR                                _launchTimerId = 0;
     virtual ~CSampleCredential();
     long                                    _cRef;
     bool _patternReady = false;

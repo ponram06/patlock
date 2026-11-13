@@ -5,30 +5,50 @@
 
 namespace patlock {
 namespace {
+
+enum class VisualState {
+    Drawing,
+    Success,
+    ErrorWrong,
+    ErrorLockout,
+    ErrorTooShort
+};
+
 struct State {
     Pattern pattern;
     bool dragging = false;
     bool hide = false;
-    bool tooShort = false;
+    VisualState visual = VisualState::Drawing;
     POINT previous{};
+    PatternVerifier verifier = nullptr;
+    int hoverDot = -1;
 };
 
-struct Layout { int x; int y; int spacing; int radius; };
+struct Layout {
+    int x;
+    int y;
+    int spacing;
+    int radius;
+    int hitRadius;
+};
 
 Layout Grid(HWND window) noexcept {
-    RECT r{}; GetClientRect(window, &r);
-    const int spacing = (std::max)(30, (std::min)(static_cast<int>(r.right) - 100, static_cast<int>(r.bottom) - 150) / 2);
-    return {static_cast<int>(r.right) / 2 - spacing, 70, spacing, spacing / 4};
+    RECT r{};
+    GetClientRect(window, &r);
+    const int availableWidth = static_cast<int>(r.right);
+    const int availableHeight = static_cast<int>(r.bottom);
+    const int spacing = (std::max)(65, (std::min)(availableWidth - 90, availableHeight - 160) / 2);
+    const int startX = availableWidth / 2 - spacing;
+    const int startY = 100;
+    return {startX, startY, spacing, 14, 34};
 }
 
 POINT Dot(Layout grid, int dot) noexcept {
-    return {grid.x + dot % 3 * grid.spacing, grid.y + dot / 3 * grid.spacing};
+    return {grid.x + (dot % 3) * grid.spacing, grid.y + (dot / 3) * grid.spacing};
 }
 
-int DotAt(HWND window, POINT pt) noexcept {
+int DotAt(HWND window, POINT pt, int threshold) noexcept {
     const Layout grid = Grid(window);
-    // 1.4x radius makes starting and hovering over dots on trackpads effortless
-    const int threshold = (grid.radius * 7) / 5;
     for (BYTE i = 0; i < 9; ++i) {
         const POINT p = Dot(grid, i);
         const int dx = pt.x - p.x;
@@ -45,7 +65,8 @@ void Track(HWND window, State& state, POINT to) noexcept {
     const double dx = static_cast<double>(to.x) - state.previous.x;
     const double dy = static_cast<double>(to.y) - state.previous.y;
     const double length = dx * dx + dy * dy;
-    const double hitRadius = (grid.radius * 6.0) / 5.0;
+    const double hitRadius = static_cast<double>(grid.hitRadius);
+
     for (BYTE i = 0; i < 9; ++i) {
         const POINT p = Dot(grid, i);
         double t = length > 0 ? ((p.x - state.previous.x) * dx + (p.y - state.previous.y) * dy) / length : 0;
@@ -60,122 +81,203 @@ void Track(HWND window, State& state, POINT to) noexcept {
     InvalidateRect(window, nullptr, FALSE);
 }
 
+void FinishPattern(HWND window, State& state) noexcept {
+    if (state.visual != VisualState::Drawing) return;
+    KillTimer(window, 2);
+    KillTimer(window, 3);
+
+    if (!state.pattern.Valid()) {
+        if (state.pattern.count > 0) {
+            state.pattern.Clear();
+            state.dragging = false;
+            state.visual = VisualState::ErrorTooShort;
+            ReleaseCapture();
+            InvalidateRect(window, nullptr, FALSE);
+            SetTimer(window, 5, 1200, nullptr);
+        }
+        return;
+    }
+
+    state.dragging = false;
+    ReleaseCapture();
+
+    if (state.verifier) {
+        VerifyResult result = state.verifier(state.pattern);
+        if (result == VerifyResult::Success) {
+            state.visual = VisualState::Success;
+            InvalidateRect(window, nullptr, FALSE);
+            // Allow user to see emerald confirmation for 140ms then close
+            SetTimer(window, 4, 140, nullptr);
+        } else if (result == VerifyResult::Lockout) {
+            state.visual = VisualState::ErrorLockout;
+            InvalidateRect(window, nullptr, FALSE);
+            SetTimer(window, 1, 1800, nullptr);
+        } else {
+            // WrongPattern or general error: flash red for 900ms then auto-reset for retry
+            state.visual = VisualState::ErrorWrong;
+            InvalidateRect(window, nullptr, FALSE);
+            SetTimer(window, 6, 900, nullptr);
+        }
+    } else {
+        state.visual = VisualState::Success;
+        InvalidateRect(window, nullptr, FALSE);
+        EndDialog(window, IDOK);
+    }
+}
+
 INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcept {
     State* state = reinterpret_cast<State*>(GetWindowLongPtrW(window, DWLP_USER));
     if (message == WM_INITDIALOG) {
         state = reinterpret_cast<State*>(lp);
         SetWindowLongPtrW(window, DWLP_USER, lp);
-        SetWindowTextW(window, L"Patlock - Pattern Unlock (Glide Mode)");
+        SetWindowTextW(window, L"Patlock - Pattern Sign-in");
+
+        // Enable Windows 11 Dark Mode on the window frame if supported
+        HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+        if (dwm) {
+            auto pfnDwmSetWindowAttribute = reinterpret_cast<HRESULT(WINAPI*)(HWND, DWORD, LPCVOID, DWORD)>(
+                GetProcAddress(dwm, "DwmSetWindowAttribute"));
+            if (pfnDwmSetWindowAttribute) {
+                BOOL darkMode = TRUE;
+                pfnDwmSetWindowAttribute(window, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &darkMode, sizeof(darkMode));
+                DWORD corner = 2 /* DWMWCP_ROUND */;
+                pfnDwmSetWindowAttribute(window, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &corner, sizeof(corner));
+            }
+            FreeLibrary(dwm);
+        }
+
         if (!SetTimer(window, 1, 120000, nullptr)) EndDialog(window, -1);
         return TRUE;
     }
     if (!state) return FALSE;
+
     if (message == WM_LBUTTONDOWN || message == WM_MOUSEMOVE || message == WM_LBUTTONUP) {
         if (!SetTimer(window, 1, 120000, nullptr)) { state->pattern.Clear(); EndDialog(window, -1); return TRUE; }
     }
+
     switch (message) {
     case WM_TIMER:
         if (wp == 1) {
+            // Security timeout or lockout close
             state->pattern.Clear();
             ReleaseCapture();
             EndDialog(window, IDCANCEL);
             return TRUE;
         }
         if (wp == 2) {
+            // Auto-finish on pause
             KillTimer(window, 2);
-            if (state->pattern.Valid()) {
-                state->dragging = false;
-                ReleaseCapture();
-                EndDialog(window, IDOK);
-            }
+            FinishPattern(window, *state);
             return TRUE;
         }
         if (wp == 3) {
+            // Idle timeout with incomplete pattern
             KillTimer(window, 3);
-            if (state->dragging && !state->pattern.Valid() && state->pattern.count > 0) {
+            FinishPattern(window, *state);
+            return TRUE;
+        }
+        if (wp == 4) {
+            // Success animation complete -> close dialog with IDOK
+            KillTimer(window, 4);
+            EndDialog(window, IDOK);
+            return TRUE;
+        }
+        if (wp == 5) {
+            // Reset "too short" error state back to normal
+            KillTimer(window, 5);
+            if (state->visual == VisualState::ErrorTooShort) {
+                state->visual = VisualState::Drawing;
+                InvalidateRect(window, nullptr, FALSE);
+            }
+            return TRUE;
+        }
+        if (wp == 6) {
+            // Red flash error display finished -> reset pattern and allow instant redraw
+            KillTimer(window, 6);
+            if (state->visual == VisualState::ErrorWrong) {
                 state->pattern.Clear();
+                state->visual = VisualState::Drawing;
                 state->dragging = false;
-                state->tooShort = true;
-                ReleaseCapture();
                 InvalidateRect(window, nullptr, FALSE);
             }
             return TRUE;
         }
         return TRUE;
+
     case WM_DESTROY:
-        KillTimer(window, 1);
-        KillTimer(window, 2);
-        KillTimer(window, 3);
+        for (UINT_PTR id = 1; id <= 6; ++id) KillTimer(window, id);
         return TRUE;
+
     case WM_ERASEBKGND:
-        return TRUE; // Double-buffering handles background to eliminate flicker
+        return TRUE; // Double buffer handles background painting cleanly
+
     case WM_LBUTTONDOWN: {
-        KillTimer(window, 2);
-        KillTimer(window, 3);
         const POINT current = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-        // Tap to finish if already completed valid pattern
+        if (state->visual != VisualState::Drawing) return TRUE;
+
+        // Tapping on last dot finishes pattern if valid
         if (state->dragging && state->pattern.Valid()) {
-            state->dragging = false;
-            ReleaseCapture();
-            EndDialog(window, IDOK);
+            FinishPattern(window, *state);
             return TRUE;
         }
+
+        // Start drawing on click or tap
         state->pattern.Clear();
-        state->tooShort = false;
+        state->visual = VisualState::Drawing;
         state->dragging = true;
         state->previous = current;
         SetCapture(window);
-        const int dot = DotAt(window, current);
+        const Layout grid = Grid(window);
+        const int dot = DotAt(window, current, grid.hitRadius);
         if (dot >= 0) state->pattern.Add(static_cast<BYTE>(dot));
         InvalidateRect(window, nullptr, FALSE);
         return TRUE;
     }
+
     case WM_MOUSEMOVE: {
         const POINT current = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        if (state->visual != VisualState::Drawing) return TRUE;
+
+        const Layout grid = Grid(window);
         if (!state->dragging) {
-            // Glide-to-start: hovering over any dot starts drawing immediately
-            // No double-tap or button holding required on trackpads
-            const int dot = DotAt(window, current);
+            // Glide-to-start: hovering near any dot begins drawing immediately without clicks
+            const int dot = DotAt(window, current, grid.hitRadius);
+            state->hoverDot = dot;
             if (dot >= 0) {
                 state->dragging = true;
-                state->tooShort = false;
+                state->visual = VisualState::Drawing;
                 state->pattern.Clear();
                 state->pattern.Add(static_cast<BYTE>(dot));
                 state->previous = current;
                 SetCapture(window);
                 InvalidateRect(window, nullptr, FALSE);
+            } else {
+                InvalidateRect(window, nullptr, FALSE);
             }
         } else {
+            state->hoverDot = DotAt(window, current, grid.hitRadius);
             Track(window, *state, current);
             KillTimer(window, 2);
             KillTimer(window, 3);
             if (state->pattern.Valid()) {
-                // Pause for 380ms on the final dot auto-completes and submits
-                SetTimer(window, 2, 380, nullptr);
+                // Pause for 350ms on final dot auto-completes and verifies
+                SetTimer(window, 2, 350, nullptr);
             } else if (state->pattern.count > 0) {
-                SetTimer(window, 3, 2000, nullptr);
+                SetTimer(window, 3, 1800, nullptr);
             }
         }
         return TRUE;
     }
+
     case WM_LBUTTONUP: {
-        KillTimer(window, 2);
-        KillTimer(window, 3);
+        if (state->visual != VisualState::Drawing) return TRUE;
         if (state->dragging) {
             Track(window, *state, {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
-            ReleaseCapture();
-            if (state->pattern.Valid()) {
-                state->dragging = false;
-                EndDialog(window, IDOK);
-            } else if (state->pattern.count > 0) {
-                state->pattern.Clear();
-                state->dragging = false;
-                state->tooShort = true;
-                InvalidateRect(window, nullptr, FALSE);
-            }
+            FinishPattern(window, *state);
         }
         return TRUE;
     }
+
     case WM_CAPTURECHANGED:
     case WM_CANCELMODE:
         if (state->dragging && !state->pattern.Valid()) {
@@ -184,6 +286,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             InvalidateRect(window, nullptr, FALSE);
         }
         return TRUE;
+
     case WM_COMMAND:
         if (LOWORD(wp) == IDCANCEL) {
             state->pattern.Clear();
@@ -192,11 +295,13 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             return TRUE;
         }
         return FALSE;
+
     case WM_CLOSE:
         state->pattern.Clear();
         ReleaseCapture();
         EndDialog(window, IDCANCEL);
         return TRUE;
+
     case WM_PAINT: {
         PAINTSTRUCT paint{};
         HDC hdc = BeginPaint(window, &paint);
@@ -208,25 +313,86 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         HBITMAP memBmp = CreateCompatibleBitmap(hdc, rect.right, rect.bottom);
         HGDIOBJ oldBmp = SelectObject(dc, memBmp);
 
-        FillRect(dc, &rect, reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1));
+        // Dark slate surface matching Windows 11 Fluent dark mode
+        HBRUSH bgBrush = CreateSolidBrush(RGB(22, 24, 30));
+        FillRect(dc, &rect, bgBrush);
+        DeleteObject(bgBrush);
         SetBkMode(dc, TRANSPARENT);
-        RECT hint = rect;
-        hint.top = 10;
-        hint.bottom = 58;
 
-        if (state->tooShort) {
-            SetTextColor(dc, RGB(210, 40, 40));
-            DrawTextW(dc, L"Pattern too short (minimum 5 dots). Try again.", -1, &hint, DT_CENTER | DT_WORDBREAK);
-        } else {
-            SetTextColor(dc, RGB(60, 60, 60));
-            DrawTextW(dc, L"Glide across 5+ dots to draw.\nPause on last dot or tap to unlock. Esc to cancel.", -1, &hint, DT_CENTER | DT_WORDBREAK);
+        // Header typography (Segoe UI)
+        HFONT titleFont = CreateFontW(-19, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        HFONT subFont = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        HFONT hintFont = CreateFontW(-11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+
+        PCWSTR titleText = L"Sign in with Pattern";
+        PCWSTR subText = L"Glide across 5+ dots to unlock";
+        COLORREF titleColor = RGB(245, 246, 250);
+        COLORREF subColor = RGB(155, 162, 178);
+        COLORREF lineColor = RGB(0, 165, 255);       // Electric cyan-blue
+        COLORREF ringColor = RGB(0, 165, 255);
+        COLORREF ringBgColor = RGB(16, 42, 75);
+        COLORREF coreColor = RGB(225, 245, 255);
+
+        if (state->visual == VisualState::Success) {
+            titleText = L"Pattern Verified";
+            subText = L"Signing in...";
+            titleColor = RGB(46, 213, 115);        // Emerald green
+            subColor = RGB(160, 235, 190);
+            lineColor = RGB(46, 213, 115);
+            ringColor = RGB(46, 213, 115);
+            ringBgColor = RGB(20, 60, 35);
+            coreColor = RGB(230, 255, 235);
+        } else if (state->visual == VisualState::ErrorWrong) {
+            titleText = L"Incorrect Pattern";
+            subText = L"Please try again";
+            titleColor = RGB(255, 75, 75);         // Vivid coral-red
+            subColor = RGB(255, 175, 175);
+            lineColor = RGB(255, 75, 75);
+            ringColor = RGB(255, 75, 75);
+            ringBgColor = RGB(70, 22, 28);
+            coreColor = RGB(255, 225, 230);
+        } else if (state->visual == VisualState::ErrorTooShort) {
+            titleText = L"Pattern Too Short";
+            subText = L"Connect at least 5 dots";
+            titleColor = RGB(255, 75, 75);
+            subColor = RGB(255, 175, 175);
+            lineColor = RGB(255, 75, 75);
+            ringColor = RGB(255, 75, 75);
+            ringBgColor = RGB(70, 22, 28);
+            coreColor = RGB(255, 225, 230);
+        } else if (state->visual == VisualState::ErrorLockout) {
+            titleText = L"Pattern Locked Out";
+            subText = L"Too many attempts. Use Password.";
+            titleColor = RGB(255, 75, 75);
+            subColor = RGB(255, 175, 175);
+            lineColor = RGB(255, 75, 75);
+            ringColor = RGB(255, 75, 75);
+            ringBgColor = RGB(70, 22, 28);
+            coreColor = RGB(255, 225, 230);
         }
 
-        const Layout grid = Grid(window);
-        HPEN pen = CreatePen(PS_SOLID, 4, RGB(0, 120, 215));
-        HGDIOBJ oldPen = pen ? SelectObject(dc, pen) : nullptr;
+        // Render Title
+        RECT titleRect{0, 18, rect.right, 46};
+        HGDIOBJ oldFont = SelectObject(dc, titleFont);
+        SetTextColor(dc, titleColor);
+        DrawTextW(dc, titleText, -1, &titleRect, DT_CENTER | DT_SINGLELINE);
 
-        // Draw connections between visited dots
+        // Render Subtitle
+        RECT subRect{0, 48, rect.right, 74};
+        SelectObject(dc, subFont);
+        SetTextColor(dc, subColor);
+        DrawTextW(dc, subText, -1, &subRect, DT_CENTER | DT_SINGLELINE);
+
+        const Layout grid = Grid(window);
+
+        // Render Connecting Lines with rounded caps and rounded joins
+        LOGBRUSH lb{BS_SOLID, lineColor, 0};
+        HPEN linePen = ExtCreatePen(PS_GEOMETRIC | PS_SOLID | PS_ENDCAP_ROUND | PS_JOIN_ROUND, 6, &lb, 0, nullptr);
+        HGDIOBJ prevPen = linePen ? SelectObject(dc, linePen) : nullptr;
+
         if (!state->hide && state->pattern.count) {
             POINT p = Dot(grid, state->pattern.dots[0]);
             MoveToEx(dc, p.x, p.y, nullptr);
@@ -234,38 +400,86 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 p = Dot(grid, state->pattern.dots[i]);
                 LineTo(dc, p.x, p.y);
             }
-            // LIVE RUBBER-BAND LINE:
-            // Draws line following mouse/finger from the last dot to current cursor position
-            if (state->dragging) {
+            // LIVE RUBBER-BAND LINE following cursor tip
+            if (state->dragging && state->visual == VisualState::Drawing) {
                 LineTo(dc, state->previous.x, state->previous.y);
             }
         }
 
-        HBRUSH activeBrush = CreateSolidBrush(RGB(0, 120, 215));
-        HBRUSH inactiveBrush = CreateSolidBrush(RGB(200, 200, 200));
-        HPEN activePen = CreatePen(PS_SOLID, 2, RGB(0, 90, 180));
-        HPEN inactivePen = CreatePen(PS_SOLID, 1, RGB(160, 160, 160));
-
+        // Render 9 Grid Dots with modern layered halos
         for (BYTE i = 0; i < 9; ++i) {
             const POINT p = Dot(grid, i);
             const bool visited = !state->hide && state->pattern.Contains(i);
-            HGDIOBJ b = visited ? activeBrush : inactiveBrush;
-            HGDIOBJ pn = visited ? activePen : inactivePen;
-            HGDIOBJ prevB = SelectObject(dc, b);
-            HGDIOBJ prevPn = SelectObject(dc, pn);
-            const int r = visited ? 14 : 10;
-            Ellipse(dc, p.x - r, p.y - r, p.x + r, p.y + r);
-            SelectObject(dc, prevPn);
-            SelectObject(dc, prevB);
+            const bool hovered = (!visited && state->hoverDot == i && state->visual == VisualState::Drawing);
+
+            if (visited) {
+                // Active Visited Dot: Outer glow halo + solid bright core
+                HPEN vPen = CreatePen(PS_SOLID, 2, ringColor);
+                HBRUSH vBrush = CreateSolidBrush(ringBgColor);
+                HGDIOBJ oP = SelectObject(dc, vPen);
+                HGDIOBJ oB = SelectObject(dc, vBrush);
+                Ellipse(dc, p.x - 20, p.y - 20, p.x + 20, p.y + 20);
+
+                HBRUSH cBrush = CreateSolidBrush(coreColor);
+                SelectObject(dc, cBrush);
+                Ellipse(dc, p.x - 7, p.y - 7, p.x + 7, p.y + 7);
+
+                SelectObject(dc, oP);
+                SelectObject(dc, oB);
+                DeleteObject(vPen);
+                DeleteObject(vBrush);
+                DeleteObject(cBrush);
+            } else if (hovered) {
+                // Hovered Dot: subtle cyan highlight ring
+                HPEN hPen = CreatePen(PS_SOLID, 2, RGB(0, 165, 255));
+                HBRUSH hBrush = CreateSolidBrush(RGB(18, 48, 82));
+                HGDIOBJ oP = SelectObject(dc, hPen);
+                HGDIOBJ oB = SelectObject(dc, hBrush);
+                Ellipse(dc, p.x - 18, p.y - 18, p.x + 18, p.y + 18);
+
+                HBRUSH cBrush = CreateSolidBrush(RGB(220, 240, 255));
+                SelectObject(dc, cBrush);
+                Ellipse(dc, p.x - 6, p.y - 6, p.x + 6, p.y + 6);
+
+                SelectObject(dc, oP);
+                SelectObject(dc, oB);
+                DeleteObject(hPen);
+                DeleteObject(hBrush);
+                DeleteObject(cBrush);
+            } else {
+                // Unvisited Dot: dark halo + pearl center
+                HPEN uPen = CreatePen(PS_SOLID, 1, RGB(52, 58, 72));
+                HBRUSH uBrush = CreateSolidBrush(RGB(28, 31, 40));
+                HGDIOBJ oP = SelectObject(dc, uPen);
+                HGDIOBJ oB = SelectObject(dc, uBrush);
+                Ellipse(dc, p.x - 15, p.y - 15, p.x + 15, p.y + 15);
+
+                HBRUSH cBrush = CreateSolidBrush(RGB(175, 182, 195));
+                SelectObject(dc, cBrush);
+                Ellipse(dc, p.x - 5, p.y - 5, p.x + 5, p.y + 5);
+
+                SelectObject(dc, oP);
+                SelectObject(dc, oB);
+                DeleteObject(uPen);
+                DeleteObject(uBrush);
+                DeleteObject(cBrush);
+            }
         }
 
-        if (activeBrush) DeleteObject(activeBrush);
-        if (inactiveBrush) DeleteObject(inactiveBrush);
-        if (activePen) DeleteObject(activePen);
-        if (inactivePen) DeleteObject(inactivePen);
-        if (oldPen) SelectObject(dc, oldPen);
-        if (pen) DeleteObject(pen);
+        // Render Escape hint at bottom
+        RECT footerRect{0, rect.bottom - 28, rect.right, rect.bottom - 8};
+        SelectObject(dc, hintFont);
+        SetTextColor(dc, RGB(110, 116, 132));
+        DrawTextW(dc, L"Press Esc to cancel", -1, &footerRect, DT_CENTER | DT_SINGLELINE);
 
+        if (prevPen) SelectObject(dc, prevPen);
+        if (linePen) DeleteObject(linePen);
+        SelectObject(dc, oldFont);
+        DeleteObject(titleFont);
+        DeleteObject(subFont);
+        DeleteObject(hintFont);
+
+        // Blit to screen
         BitBlt(hdc, 0, 0, rect.right, rect.bottom, dc, 0, 0, SRCCOPY);
         SelectObject(dc, oldBmp);
         DeleteObject(memBmp);
@@ -276,17 +490,25 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
     }
     return FALSE;
 }
+
 } // anon namespace
 
-HRESULT DrawPattern(HINSTANCE instance, HWND owner, bool hideTrail, Pattern& output) noexcept {
+HRESULT DrawPatternInteractive(
+    HINSTANCE instance,
+    HWND owner,
+    bool hideTrail,
+    const PatternVerifier& verifier,
+    Pattern& output) noexcept
+{
     output.Clear();
     alignas(DWORD) BYTE buffer[sizeof(DLGTEMPLATE) + 3 * sizeof(WORD)]{};
     auto* dialog = reinterpret_cast<DLGTEMPLATE*>(buffer);
     dialog->style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_CENTER;
-    dialog->cx = 260;
-    dialog->cy = 260;
+    dialog->cx = 280;
+    dialog->cy = 290;
     State state;
     state.hide = hideTrail;
+    state.verifier = verifier;
     const INT_PTR result = DialogBoxIndirectParamW(instance, dialog, owner, Dialog, reinterpret_cast<LPARAM>(&state));
     if (result == IDOK && state.pattern.Valid()) {
         output = state.pattern;
@@ -295,4 +517,9 @@ HRESULT DrawPattern(HINSTANCE instance, HWND owner, bool hideTrail, Pattern& out
     if (result == IDCANCEL) return S_FALSE;
     return E_FAIL;
 }
+
+HRESULT DrawPattern(HINSTANCE instance, HWND owner, bool hideTrail, Pattern& output) noexcept {
+    return DrawPatternInteractive(instance, owner, hideTrail, nullptr, output);
+}
+
 } // namespace patlock

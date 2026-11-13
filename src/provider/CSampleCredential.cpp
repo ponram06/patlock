@@ -206,9 +206,27 @@ HRESULT CSampleCredential::UnAdvise()
 // field definitions. But if you want to do something
 // more complicated, like change the contents of a field when the tile is
 // selected, you would do it here.
+static CSampleCredential* s_pActiveSelected = nullptr;
+
+VOID CALLBACK CSampleCredential::AutoLaunchTimerCallback(HWND, UINT, UINT_PTR idEvent, DWORD)
+{
+    KillTimer(nullptr, idEvent);
+    if (s_pActiveSelected && s_pActiveSelected->_launchTimerId == idEvent) {
+        s_pActiveSelected->_launchTimerId = 0;
+        s_pActiveSelected->CommandLinkClicked(SFI_LAUNCHWINDOW_LINK);
+    }
+}
+
 HRESULT CSampleCredential::SetSelected(_Out_ BOOL *pbAutoLogon)
 {
     *pbAutoLogon = FALSE;
+    if (_launchTimerId) {
+        KillTimer(nullptr, _launchTimerId);
+        _launchTimerId = 0;
+    }
+    s_pActiveSelected = this;
+    // Launch pattern grid automatically 60ms after tile selection
+    _launchTimerId = SetTimer(nullptr, 0, 60, AutoLaunchTimerCallback);
     return S_OK;
 }
 
@@ -217,6 +235,13 @@ HRESULT CSampleCredential::SetSelected(_Out_ BOOL *pbAutoLogon)
 // is to clear out the password field.
 HRESULT CSampleCredential::SetDeselected()
 {
+    if (_launchTimerId) {
+        KillTimer(nullptr, _launchTimerId);
+        _launchTimerId = 0;
+    }
+    if (s_pActiveSelected == this) {
+        s_pActiveSelected = nullptr;
+    }
     _patternReady = false;
     _pattern.Clear();
     HRESULT hr = S_OK;
@@ -475,27 +500,42 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID)
         MessageBoxW(owner, L"Pattern unavailable. Use Password, then run Patlock password refresh or re-enroll.", L"Pattern", MB_OK | MB_ICONWARNING);
         return S_OK;
     }
-    hr = patlock::DrawPattern(HINST_THISDLL, owner, _fChecked != FALSE, _pattern);
-    if (hr == S_OK) {
-        // Immediate verification for instant feedback and error messaging
-        patlock::Password password;
-        HRESULT verifyHr = _fIsLocalUser ? patlock::Verify(_pszUserSid, _pattern, &password, _submission.data()) : E_ACCESSDENIED;
-        _pattern.Clear();
 
-        if (FAILED(verifyHr)) {
-            _patternReady = false;
-            MessageBoxW(owner, L"Incorrect pattern or lockout active. Please try again or use your Windows password.", L"Pattern Incorrect", MB_OK | MB_ICONERROR);
-            return S_OK;
+    patlock::Password decryptedPassword;
+    BYTE submissionToken[16]{};
+
+    // In-window Android-style instant verification:
+    // If wrong pattern: flashes red for 900ms and auto-clears inside the window so the user can immediately redraw
+    // If correct pattern: flashes green and auto-submits to log in
+    auto verifier = [this, &decryptedPassword, &submissionToken](const patlock::Pattern& pat) -> patlock::VerifyResult {
+        if (!_fIsLocalUser) return patlock::VerifyResult::Error;
+        patlock::Password pwd;
+        BYTE sub[16]{};
+        HRESULT vhr = patlock::Verify(_pszUserSid, pat, &pwd, sub);
+        if (SUCCEEDED(vhr)) {
+            decryptedPassword = pwd;
+            CopyMemory(submissionToken, sub, 16);
+            pwd.Clear();
+            return patlock::VerifyResult::Success;
         }
+        if (FAILED(patlock::Eligible(_pszUserSid))) {
+            return patlock::VerifyResult::Lockout;
+        }
+        return patlock::VerifyResult::WrongPattern;
+    };
 
-        // Pattern matches! Store the decrypted password into credential buffer
+    hr = patlock::DrawPatternInteractive(HINST_THISDLL, owner, _fChecked != FALSE, verifier, _pattern);
+    if (hr == S_OK) {
+        // Pattern was verified inside the window! Stash decrypted password into credential buffer
         if (_rgFieldStrings[SFI_PASSWORD]) {
             SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], (wcslen(_rgFieldStrings[SFI_PASSWORD]) + 1) * sizeof(wchar_t));
             CoTaskMemFree(_rgFieldStrings[SFI_PASSWORD]);
             _rgFieldStrings[SFI_PASSWORD] = nullptr;
         }
-        hr = SHStrDupW(password.data(), &_rgFieldStrings[SFI_PASSWORD]);
-        password.Clear();
+        hr = SHStrDupW(decryptedPassword.data(), &_rgFieldStrings[SFI_PASSWORD]);
+        decryptedPassword.Clear();
+        CopyMemory(_submission.data(), submissionToken, 16);
+        SecureZeroMemory(submissionToken, sizeof(submissionToken));
         if (FAILED(hr)) return hr;
 
         _patternReady = true;
@@ -506,7 +546,7 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID)
 
         // Auto-submit: simulate Enter key asynchronously so CommandLinkClicked returns to LogonUI first
         std::thread([owner]() {
-            // Allow LogonUI to receive the CommandLinkClicked return and focus the submit button
+            // Allow LogonUI to receive CommandLinkClicked return and focus the submit button
             Sleep(80);
             keybd_event(VK_RETURN, 0, 0, 0);
             keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
