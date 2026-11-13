@@ -12,6 +12,14 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Guided CMD VM test launcher
+- Written: root RUN_VM_TEST.cmd and install/run-vm-test.ps1; VMware check before
+  elevation, VS2022 CMake discovery, build/CTest gate, snapshot/Password checks,
+  uninstall/reboot checkpoint, fixed-DLL removal/install, enrollment/demo launch.
+- Rerun the same launcher after reboot; tested binary hashes must match. Manual
+  lock-screen and TPM evidence still required. See ONE_CLICK_VM_TEST.md.
+- Verification: PowerShell parsing, source review and whitespace checks only.
+  No script execution, builds, registry changes or installation on the host.
 ### 2026-11-13: Integrated release-candidate implementation pass (record 6)
 - Written: KTM registry transactions and removal; unique TPM generation cleanup
   and postcommit retirement; explicit no-TPM fallback with operational failures

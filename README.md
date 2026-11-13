@@ -1,5 +1,9 @@
 # Patlock - Trackpad Pattern Sign-In for Windows
 
+**Guided VM test:** double-click `RUN_VM_TEST.cmd` inside the VMware VM. After its
+reboot step, sign in with Password and run the same file again. See
+[launcher instructions](docs/ONE_CLICK_VM_TEST.md). Never run it on your main PC.
+
 **Current candidate: record format 6; VM re-enrollment required after upgrading.**
 This candidate has not yet been built or lock-screen tested. Follow
 [VM_ACCEPTANCE.md](docs/VM_ACCEPTANCE.md) and [release status](docs/RELEASE_STATUS.md).

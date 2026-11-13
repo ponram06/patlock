@@ -27,3 +27,4 @@ build/
 .superpowers/
 .pattern_unlock.json
 dist/
+.patlock-vm-test.json
