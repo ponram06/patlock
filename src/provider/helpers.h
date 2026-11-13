@@ -11,18 +11,26 @@
 
 #pragma once
 
+#ifndef SECURITY_WIN32
+#define SECURITY_WIN32
+#endif
+
 #pragma warning(push)
 #pragma warning(disable: 28251)
 #include <credentialprovider.h>
 #include <ntsecapi.h>
 #pragma warning(pop)
 
-#define SECURITY_WIN32
 #include <security.h>
+#include <sspi.h>
 #include <intsafe.h>
 
 #include <windows.h>
 #include <strsafe.h>
+
+#ifndef NEGOSSP_NAME_A
+#define NEGOSSP_NAME_A "Negotiate"
+#endif
 
 #pragma warning(push)
 #pragma warning(disable: 4995)
