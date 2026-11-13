@@ -12,6 +12,23 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Trackpad Glide Mode, Live Rubber-Band Trail & Asynchronous Auto-Login
+- Built:
+  - Live rubber-band line in `src/common/pattern_window.cpp` following the mouse/finger from the last captured dot to current cursor coordinates in real time.
+  - Seamless glide-to-start (`DotAt` with 1.4x hit radius): cursor hovering over any dot immediately starts pattern capture without physical clicks or double-tapping.
+  - Double-buffered flicker-free rendering in `WM_PAINT` with high-contrast active dots (radius 14, deep blue) and inactive dots (radius 10, soft gray).
+  - Explicit window title `Patlock - Pattern Unlock (Glide Mode)` for unmistakable version verification on the lock screen.
+  - Flexible pattern completion: auto-submits on 380ms pause, OR tapping/clicking on the final dot, OR releasing the mouse/trackpad button.
+  - Immediate pattern verification in `CSampleCredential::CommandLinkClicked`: shows instant `MessageBoxW` alert upon incorrect pattern or lockout without silent declines.
+  - Asynchronous auto-submission: gives keyboard focus to `SFI_SUBMIT_BUTTON` and pulses `VK_RETURN` on a background worker thread after `CommandLinkClicked` returns, automatically submitting the credential to LogonUI without requiring manual arrow button clicks.
+  - Automated VM deployment script `install/update.ps1` and one-click `update.cmd` that stops lingering test processes, safely updates in-use `PatlockProvider.dll` in System32 even if locked by LogonUI, and verifies the installation via SHA-256 hash comparison.
+- Verified in VM by user:
+  - Previous Phase 4 unlock succeeded with pattern entry and manual submit arrow.
+- Not verified yet:
+  - Live VM verification of the new glide trail and asynchronous auto-submission.
+- Next step:
+  - User pulls latest commits and runs `update.cmd` in the VM to test glide unlock and auto-login.
+
 ### 2026-11-13: Phase 7 source checkpoint; trackpad tuning harness & hardware safeguards
 - Written: interactive multi-pass desktop tuning harness in `src/tools/pattern_window_demo/main.cpp`
   with real-time dot sequence breakdown, length and validity reporting, and trail visibility toggle.
