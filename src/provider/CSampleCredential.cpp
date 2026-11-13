@@ -509,15 +509,14 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID)
     // If correct pattern: flashes green and auto-submits to log in
     auto verifier = [this, &decryptedPassword, &submissionToken](const patlock::Pattern& pat) -> patlock::VerifyResult {
         if (!_fIsLocalUser) return patlock::VerifyResult::Error;
-        patlock::Password pwd;
         BYTE sub[16]{};
-        HRESULT vhr = patlock::Verify(_pszUserSid, pat, &pwd, sub);
+        HRESULT vhr = patlock::Verify(_pszUserSid, pat, &decryptedPassword, sub);
         if (SUCCEEDED(vhr)) {
-            decryptedPassword = pwd;
             CopyMemory(submissionToken, sub, 16);
-            pwd.Clear();
+            SecureZeroMemory(sub, sizeof(sub));
             return patlock::VerifyResult::Success;
         }
+        decryptedPassword.Clear();
         if (FAILED(patlock::Eligible(_pszUserSid))) {
             return patlock::VerifyResult::Lockout;
         }
