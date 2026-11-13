@@ -17,6 +17,7 @@
 #include "guid.h"
 #include "pattern_window.h"
 #include "security.h"
+#include <thread>
 
 CSampleCredential::CSampleCredential():
     _cRef(1),
@@ -476,19 +477,46 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID)
     }
     hr = patlock::DrawPattern(HINST_THISDLL, owner, _fChecked != FALSE, _pattern);
     if (hr == S_OK) {
+        // Immediate verification for instant feedback and error messaging
+        patlock::Password password;
+        HRESULT verifyHr = _fIsLocalUser ? patlock::Verify(_pszUserSid, _pattern, &password, _submission.data()) : E_ACCESSDENIED;
+        _pattern.Clear();
+
+        if (FAILED(verifyHr)) {
+            _patternReady = false;
+            MessageBoxW(owner, L"Incorrect pattern or lockout active. Please try again or use your Windows password.", L"Pattern Incorrect", MB_OK | MB_ICONERROR);
+            return S_OK;
+        }
+
+        // Pattern matches! Store the decrypted password into credential buffer
+        if (_rgFieldStrings[SFI_PASSWORD]) {
+            SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], (wcslen(_rgFieldStrings[SFI_PASSWORD]) + 1) * sizeof(wchar_t));
+            CoTaskMemFree(_rgFieldStrings[SFI_PASSWORD]);
+            _rgFieldStrings[SFI_PASSWORD] = nullptr;
+        }
+        hr = SHStrDupW(password.data(), &_rgFieldStrings[SFI_PASSWORD]);
+        password.Clear();
+        if (FAILED(hr)) return hr;
+
         _patternReady = true;
-        hr = _pCredProvCredentialEvents->SetFieldState(this, SFI_SUBMIT_BUTTON, CPFS_DISPLAY_IN_SELECTED_TILE);
-        if (SUCCEEDED(hr)) {
-            // Automatically submit credentials upon drawing pattern (Android-style auto-login)
-            // without requiring the user to manually click the submit arrow button.
+
+        // Show the submit button and focus it
+        _pCredProvCredentialEvents->SetFieldState(this, SFI_SUBMIT_BUTTON, CPFS_DISPLAY_IN_SELECTED_TILE);
+        _pCredProvCredentialEvents->SetFieldInteractiveState(this, SFI_SUBMIT_BUTTON, CPFIS_FOCUSED);
+
+        // Auto-submit: simulate Enter key asynchronously so CommandLinkClicked returns to LogonUI first
+        std::thread([owner]() {
+            // Allow LogonUI to receive the CommandLinkClicked return and focus the submit button
+            Sleep(80);
             keybd_event(VK_RETURN, 0, 0, 0);
             keybd_event(VK_RETURN, 0, KEYEVENTF_KEYUP, 0);
-            PostMessageW(owner, WM_KEYDOWN, VK_RETURN, 0);
-            PostMessageW(owner, WM_KEYUP, VK_RETURN, 0);
-        } else {
-            _patternReady = false;
-            _pattern.Clear();
-        }
+            Sleep(50);
+            HWND fg = GetForegroundWindow();
+            if (fg) {
+                PostMessageW(fg, WM_KEYDOWN, VK_RETURN, 0);
+                PostMessageW(fg, WM_KEYUP, VK_RETURN, 0);
+            }
+        }).detach();
     }
     return FAILED(hr) ? hr : S_OK;
 }
@@ -509,22 +537,13 @@ HRESULT CSampleCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIAL
     // A captured pattern alone is never a credential.
     if (!_patternReady) return S_OK;
     _patternReady = false;
-    patlock::Password password;
-    hr = _fIsLocalUser ? patlock::Verify(_pszUserSid, _pattern, &password, _submission.data()) : E_ACCESSDENIED;
-    _pattern.Clear();
-    if (FAILED(hr)) {
+
+    if (!_rgFieldStrings[SFI_PASSWORD] || !_rgFieldStrings[SFI_PASSWORD][0]) {
         *pcpsiOptionalStatusIcon = CPSI_WARNING;
         SHStrDupW(L"Pattern declined. Wait for lockout or use Password and refresh Patlock.", ppwszOptionalStatusText);
         return S_OK;
     }
     _awaitingResult = true;
-    if (_rgFieldStrings[SFI_PASSWORD]) {
-        SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], (wcslen(_rgFieldStrings[SFI_PASSWORD]) + 1) * sizeof(wchar_t));
-        CoTaskMemFree(_rgFieldStrings[SFI_PASSWORD]); _rgFieldStrings[SFI_PASSWORD] = nullptr;
-    }
-    hr = SHStrDupW(password.data(), &_rgFieldStrings[SFI_PASSWORD]);
-    password.Clear();
-    if (FAILED(hr)) return hr;
 
     // For local user, the domain and user name can be split from _pszQualifiedUserName (domain\username).
     // CredPackAuthenticationBuffer() cannot be used because it won't work with unlock scenario.
