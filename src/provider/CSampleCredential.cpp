@@ -18,7 +18,7 @@
 #include "guid.h"
 #include "pattern_window.h"
 #include "security.h"
-#include <thread>
+static CSampleCredential* s_pActiveSelected = nullptr;
 
 CSampleCredential::CSampleCredential():
     _cRef(1),
@@ -40,6 +40,8 @@ CSampleCredential::CSampleCredential():
 
 CSampleCredential::~CSampleCredential()
 {
+    if (_launchTimerId) KillTimer(nullptr, _launchTimerId);
+    if (s_pActiveSelected == this) s_pActiveSelected = nullptr;
     UnAdvise();
     if (_rgFieldStrings[SFI_PASSWORD])
     {
@@ -64,6 +66,7 @@ HRESULT CSampleCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
                                       _In_ FIELD_STATE_PAIR const *rgfsp,
                                       _In_ ICredentialProviderUser *pcpUser)
 {
+    if (!rgcpfd || !rgfsp || !pcpUser) return E_POINTER;
     HRESULT hr = S_OK;
     _cpus = cpus;
 
@@ -207,19 +210,22 @@ HRESULT CSampleCredential::UnAdvise()
 // field definitions. But if you want to do something
 // more complicated, like change the contents of a field when the tile is
 // selected, you would do it here.
-static CSampleCredential* s_pActiveSelected = nullptr;
-
 VOID CALLBACK CSampleCredential::AutoLaunchTimerCallback(HWND, UINT, UINT_PTR idEvent, DWORD)
 {
     KillTimer(nullptr, idEvent);
     if (s_pActiveSelected && s_pActiveSelected->_launchTimerId == idEvent) {
-        s_pActiveSelected->_launchTimerId = 0;
-        s_pActiveSelected->CommandLinkClicked(SFI_LAUNCHWINDOW_LINK);
+        CSampleCredential* credential = s_pActiveSelected;
+        credential->AddRef();
+        credential->_launchTimerId = 0;
+        credential->CommandLinkClicked(SFI_LAUNCHWINDOW_LINK);
+        credential->Release();
     }
 }
 
 HRESULT CSampleCredential::SetSelected(_Out_ BOOL *pbAutoLogon)
 {
+    if (!pbAutoLogon) return E_POINTER;
+    _selected = true;
     *pbAutoLogon = FALSE;
     if (_launchTimerId) {
         KillTimer(nullptr, _launchTimerId);
@@ -236,6 +242,7 @@ HRESULT CSampleCredential::SetSelected(_Out_ BOOL *pbAutoLogon)
 // is to clear out the password field.
 HRESULT CSampleCredential::SetDeselected()
 {
+    _selected = false;
     if (_launchTimerId) {
         KillTimer(nullptr, _launchTimerId);
         _launchTimerId = 0;
@@ -269,6 +276,7 @@ HRESULT CSampleCredential::GetFieldState(DWORD dwFieldID,
                                          _Out_ CREDENTIAL_PROVIDER_FIELD_STATE *pcpfs,
                                          _Out_ CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE *pcpfis)
 {
+    if (!pcpfs || !pcpfis) return E_POINTER;
     HRESULT hr;
 
     // Validate our parameters.
@@ -288,6 +296,8 @@ HRESULT CSampleCredential::GetFieldState(DWORD dwFieldID,
 // Sets ppwsz to the string value of the field at the index dwFieldID
 HRESULT CSampleCredential::GetStringValue(DWORD dwFieldID, _Outptr_result_nullonfailure_ PWSTR *ppwsz)
 {
+    if (!ppwsz) return E_POINTER;
+    if (dwFieldID == SFI_PASSWORD) return SHStrDupW(L"", ppwsz);
     HRESULT hr;
     *ppwsz = nullptr;
 
@@ -309,6 +319,7 @@ HRESULT CSampleCredential::GetStringValue(DWORD dwFieldID, _Outptr_result_nullon
 // Get the image to show in the user tile
 HRESULT CSampleCredential::GetBitmapValue(DWORD dwFieldID, _Outptr_result_nullonfailure_ HBITMAP *phbmp)
 {
+    if (!phbmp) return E_POINTER;
     HRESULT hr;
     *phbmp = nullptr;
 
@@ -339,6 +350,7 @@ HRESULT CSampleCredential::GetBitmapValue(DWORD dwFieldID, _Outptr_result_nullon
 // should be below the submit button.
 HRESULT CSampleCredential::GetSubmitButtonValue(DWORD dwFieldID, _Out_ DWORD *pdwAdjacentTo)
 {
+    if (!pdwAdjacentTo) return E_POINTER;
     HRESULT hr;
 
     if (SFI_SUBMIT_BUTTON == dwFieldID)
@@ -359,6 +371,8 @@ HRESULT CSampleCredential::GetSubmitButtonValue(DWORD dwFieldID, _Out_ DWORD *pd
 // This is called on each keystroke when a user types into an edit field
 HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
 {
+    if (!pwz) return E_POINTER;
+    if (dwFieldID == SFI_PASSWORD) return E_NOTIMPL;
     HRESULT hr;
 
     // Validate parameters.
@@ -386,6 +400,7 @@ HRESULT CSampleCredential::SetStringValue(DWORD dwFieldID, _In_ PCWSTR pwz)
 // Returns whether a checkbox is checked or not as well as its label.
 HRESULT CSampleCredential::GetCheckboxValue(DWORD dwFieldID, _Out_ BOOL *pbChecked, _Outptr_result_nullonfailure_ PWSTR *ppwszLabel)
 {
+    if (!pbChecked || !ppwszLabel) return E_POINTER;
     HRESULT hr;
     *ppwszLabel = nullptr;
 
@@ -428,6 +443,7 @@ HRESULT CSampleCredential::SetCheckboxValue(DWORD dwFieldID, BOOL bChecked)
 // currently selected item (pdwSelectedItem).
 HRESULT CSampleCredential::GetComboBoxValueCount(DWORD dwFieldID, _Out_ DWORD *pcItems, _Deref_out_range_(<, *pcItems) _Out_ DWORD *pdwSelectedItem)
 {
+    if (!pcItems || !pdwSelectedItem) return E_POINTER;
     HRESULT hr;
     *pcItems = 0;
     *pdwSelectedItem = 0;
@@ -451,6 +467,8 @@ HRESULT CSampleCredential::GetComboBoxValueCount(DWORD dwFieldID, _Out_ DWORD *p
 // Called iteratively to fill the combobox with the string (ppwszItem) at index dwItem.
 HRESULT CSampleCredential::GetComboBoxValueAt(DWORD dwFieldID, DWORD dwItem, _Outptr_result_nullonfailure_ PWSTR *ppwszItem)
 {
+    if (!ppwszItem) return E_POINTER;
+    if (dwItem >= ARRAYSIZE(s_rgComboBoxStrings)) { *ppwszItem = nullptr; return E_INVALIDARG; }
     HRESULT hr;
     *ppwszItem = nullptr;
 
@@ -471,6 +489,7 @@ HRESULT CSampleCredential::GetComboBoxValueAt(DWORD dwFieldID, DWORD dwItem, _Ou
 // Called when the user changes the selected item in the combobox.
 HRESULT CSampleCredential::SetComboBoxSelectedValue(DWORD dwFieldID, DWORD dwSelectedItem)
 {
+    if (dwSelectedItem >= ARRAYSIZE(s_rgComboBoxStrings)) return E_INVALIDARG;
     HRESULT hr;
 
     // Validate parameters.
@@ -489,32 +508,33 @@ HRESULT CSampleCredential::SetComboBoxSelectedValue(DWORD dwFieldID, DWORD dwSel
 }
 
 // Called when the user clicks a command link.
-HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID)
+HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID) try
 {
+    if (_dialogOpen || !_selected) return E_UNEXPECTED;
     if (dwFieldID != SFI_LAUNCHWINDOW_LINK || !_pCredProvCredentialEvents) return E_INVALIDARG;
     _patternReady = false;
     HWND owner = nullptr;
     HRESULT hr = _pCredProvCredentialEvents->OnCreatingWindow(&owner);
     if (FAILED(hr) || !owner) return E_FAIL;
     _pattern.Clear();
-    if (!_fIsLocalUser || FAILED(patlock::Eligible(_pszUserSid))) {
+    DWORD retrySeconds = 0;
+    if (!_fIsLocalUser || FAILED(patlock::QueryRetryAfter(_pszUserSid, &retrySeconds))) {
         MessageBoxW(owner, L"Pattern unavailable. Use Password, then run Patlock password refresh or re-enroll.", L"Pattern", MB_OK | MB_ICONWARNING);
         return S_OK;
     }
 
     patlock::Password decryptedPassword;
-    BYTE submissionToken[16]{};
+    patlock::Secret<BYTE, 16> submissionToken;
 
     // In-window Android-style instant verification:
     // If wrong pattern: flashes red for 900ms and auto-clears inside the window so the user can immediately redraw
     // If correct pattern: flashes green and auto-submits to log in
     auto verifier = [this, &decryptedPassword, &submissionToken](const patlock::Pattern& pat) -> patlock::VerifyResult {
         if (!_fIsLocalUser) return patlock::VerifyResult::Error;
-        BYTE sub[16]{};
-        HRESULT vhr = patlock::Verify(_pszUserSid, pat, &decryptedPassword, sub);
+        patlock::Secret<BYTE, 16> sub;
+        HRESULT vhr = patlock::Verify(_pszUserSid, pat, &decryptedPassword, sub.data());
         if (SUCCEEDED(vhr)) {
-            CopyMemory(submissionToken, sub, 16);
-            SecureZeroMemory(sub, sizeof(sub));
+            CopyMemory(submissionToken.data(), sub.data(), 16);
             return patlock::VerifyResult::Success;
         }
         decryptedPassword.Clear();
@@ -524,7 +544,12 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID)
         return patlock::VerifyResult::WrongPattern;
     };
 
-    hr = patlock::DrawPatternInteractive(HINST_THISDLL, owner, _fChecked != FALSE, verifier, _pattern);
+    _dialogOpen = true;
+    hr = patlock::DrawPatternInteractive(HINST_THISDLL, owner, _fChecked != FALSE, verifier, _pattern,
+        [this](DWORD* seconds) { return patlock::QueryRetryAfter(_pszUserSid, seconds); });
+    _dialogOpen = false;
+    _pattern.Clear();
+    if (!_selected) { _pattern.Clear(); decryptedPassword.Clear(); return S_OK; }
     if (hr == S_OK) {
         // Pattern was verified inside the window! Stash decrypted password into credential buffer
         if (_rgFieldStrings[SFI_PASSWORD]) {
@@ -534,8 +559,8 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID)
         }
         hr = SHStrDupW(decryptedPassword.data(), &_rgFieldStrings[SFI_PASSWORD]);
         decryptedPassword.Clear();
-        CopyMemory(_submission.data(), submissionToken, 16);
-        SecureZeroMemory(submissionToken, sizeof(submissionToken));
+        CopyMemory(_submission.data(), submissionToken.data(), 16);
+        submissionToken.Clear();
         if (FAILED(hr)) return hr;
 
         _patternReady = true;
@@ -555,6 +580,12 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID)
     }
     return FAILED(hr) ? hr : S_OK;
 }
+catch (...) {
+    _dialogOpen = false; _patternReady = false; _pattern.Clear(); _submission.Clear();
+    if (_rgFieldStrings[SFI_PASSWORD]) SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD],
+        (wcslen(_rgFieldStrings[SFI_PASSWORD]) + 1) * sizeof(wchar_t));
+    return E_FAIL;
+}
 
 // Collect the username and password into a serialized credential for the correct usage scenario
 // (logon/unlock is what's demonstrated in this sample).  LogonUI then passes these credentials
@@ -565,17 +596,18 @@ HRESULT CSampleCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIAL
                                             _Out_ CREDENTIAL_PROVIDER_STATUS_ICON *pcpsiOptionalStatusIcon)
 {
     HRESULT hr = E_UNEXPECTED;
+    if (!pcpgsr || !pcpcs) return E_POINTER;
     *pcpgsr = CPGSR_NO_CREDENTIAL_NOT_FINISHED;
-    *ppwszOptionalStatusText = nullptr;
-    *pcpsiOptionalStatusIcon = CPSI_NONE;
+    if (ppwszOptionalStatusText) *ppwszOptionalStatusText = nullptr;
+    if (pcpsiOptionalStatusIcon) *pcpsiOptionalStatusIcon = CPSI_NONE;
     ZeroMemory(pcpcs, sizeof(*pcpcs));
     // A captured pattern alone is never a credential.
     if (!_patternReady) return S_OK;
     _patternReady = false;
 
     if (!_rgFieldStrings[SFI_PASSWORD] || !_rgFieldStrings[SFI_PASSWORD][0]) {
-        *pcpsiOptionalStatusIcon = CPSI_WARNING;
-        SHStrDupW(L"Pattern declined. Wait for lockout or use Password and refresh Patlock.", ppwszOptionalStatusText);
+        if (pcpsiOptionalStatusIcon) *pcpsiOptionalStatusIcon = CPSI_WARNING;
+        if (ppwszOptionalStatusText) SHStrDupW(L"Pattern declined. Wait for lockout or use Password and refresh Patlock.", ppwszOptionalStatusText);
         return S_OK;
     }
     _awaitingResult = true;
@@ -717,6 +749,7 @@ HRESULT CSampleCredential::ReportResult(NTSTATUS ntsStatus,
 // Gets the SID of the user corresponding to the credential.
 HRESULT CSampleCredential::GetUserSid(_Outptr_result_nullonfailure_ PWSTR *ppszSid)
 {
+    if (!ppszSid) return E_POINTER;
     *ppszSid = nullptr;
     HRESULT hr = E_UNEXPECTED;
     if (_pszUserSid != nullptr)
@@ -733,13 +766,11 @@ HRESULT CSampleCredential::GetUserSid(_Outptr_result_nullonfailure_ PWSTR *ppszS
 HRESULT CSampleCredential::GetFieldOptions(DWORD dwFieldID,
                                            _Out_ CREDENTIAL_PROVIDER_CREDENTIAL_FIELD_OPTIONS *pcpcfo)
 {
+    if (!pcpcfo) return E_POINTER;
+    if (dwFieldID >= SFI_NUM_FIELDS) return E_INVALIDARG;
     *pcpcfo = CPCFO_NONE;
 
-    if (dwFieldID == SFI_PASSWORD)
-    {
-        *pcpcfo = CPCFO_ENABLE_PASSWORD_REVEAL;
-    }
-    else if (dwFieldID == SFI_TILEIMAGE)
+    if (dwFieldID == SFI_TILEIMAGE)
     {
         *pcpcfo = CPCFO_ENABLE_TOUCH_KEYBOARD_AUTO_INVOKE;
     }

@@ -226,10 +226,13 @@ void CSampleProvider::_CreateEnumeratedCredentials()
 
 void CSampleProvider::_ReleaseEnumeratedCredentials()
 {
+    _fAutoLogon = false;
+    _dwAutoLogonIndex = 0;
     for (CSampleCredential* pCred : _rgpCredentials)
     {
         if (pCred != nullptr)
         {
+            pCred->SetProvider(nullptr);
             pCred->Release();
         }
     }
@@ -256,8 +259,13 @@ HRESULT CSampleProvider::_EnumerateCredentials()
                     hr = pCredential->Initialize(_cpus, s_rgCredProvFieldDescriptors, s_rgFieldStatePairs, pCredUser);
                     if (SUCCEEDED(hr))
                     {
-                        pCredential->SetProvider(this);
-                        _rgpCredentials.push_back(pCredential);
+                        try {
+                            _rgpCredentials.push_back(pCredential);
+                            pCredential->SetProvider(this);
+                        } catch (...) {
+                            pCredential->Release(); pCredUser->Release();
+                            _ReleaseEnumeratedCredentials(); return E_OUTOFMEMORY;
+                        }
                     }
                     else
                     {

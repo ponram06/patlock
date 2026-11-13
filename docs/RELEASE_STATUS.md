@@ -1,28 +1,37 @@
 # Release status: 2026-11-13
 
-Source checkpoint only; market-ready acceptance is not complete.
+The release-candidate implementation pass is written. Market-ready acceptance
+is still pending the human's VM/hardware tests and distribution signing.
+**Record format 6 requires re-enrollment in the VM.**
 
-The audit repair commit 989205f was pushed successfully to origin/main.
-The subsequent source repair uses record version 5: re-enrollment is required
-inside the VM. TPM key names now include the random enrollment nonce, and
-creation no longer deletes an existing key. Failed creation therefore cannot
-destroy the prior generation. Old/orphan generations are deliberately retained;
-safe garbage collection and transactional record replacement remain pending.
-TPM deletion errors are propagated.
+Implemented in this pass:
 
-Returning a decrypted password now durably marks its record disabled with the
-matching submission token. Successful ReportResult clears it; failed or absent
-completion leaves it disabled. Repeated successful unlock and crash boundaries
-must be tested in the VM before accepting this protocol.
+- KTM transactional record writes/removal; pending submission tokens and disabled
+  state precede plaintext release; nullable outputs and COM bounds are handled.
+- Unique TPM generations, failed-new-generation cleanup, postcommit old-key
+  retirement and cleanup warnings; only genuinely absent TPM selects baseline.
+- Official PCPTool UTF-16 PIN path, silent key operations, key policy/DACL
+  requests and authorized reopen/wrapping roundtrip. These do not prove hardware
+  authorization/anti-hammering enforcement; TPM_VALIDATION.md lists needed tests.
+- Deliberate press-drag-release; DPI/monitor bounds, high contrast, native
+  keyboard fallback/status controls and authoritative timed-lockout countdown.
+- Timer/credential lifetime guards, exception containment, no hidden password
+  getter exposure, and removal of hardcoded password advice.
+- Password-authenticated enrollment removal; guarded VM build/test script,
+  five executable test targets, x64 VS2022/C++17/static-runtime project support,
+  non-destructive packaging with public SHA-256 artifact hashes.
 
-Still required before release:
+Static verification: source/code review, whitespace checks, PowerShell syntax and
+project XML parsing. No host build, executable tests, TPM access, enrollment,
+registration or installation occurred. Old user-confirmed VM unlocking does not
+verify the new candidate.
 
-- Registry commit/flush fault handling and transactional key retirement.
-- Official API validation and VM/hardware tests of PCP authorization and TPM
-  anti-hammering; current provider availability is not proof of these properties.
-- DPI-aware layout, accessible controls and keyboard/screen-reader testing.
-- Actual VM build/CTest, lock-screen fault tests, trackpad tuning, signing,
-  installer upgrade/recovery and independent security review.
+Next action: follow **VM_ACCEPTANCE.md**, including repeat unlock, stale-password,
+crash/transaction faults, TPM negative authorization, monitor/accessibility and
+trackpad cases. Record actual results in PROGRESS.md. For distribution, apply the
+publisher's signing certificate and perform independent security review.
 
-The development host must not be used to build or execute provider tests. No
-source review or successful Git push substitutes for the outstanding evidence.
+The grid is pointer input; keyboard/screen-reader users retain native Password
+fallback. A crash during TPM enrollment can leave an unused historical key;
+unknown keys must not be deleted indiscriminately. No security certification,
+forensic deletion or hardware anti-hammering guarantee is asserted.

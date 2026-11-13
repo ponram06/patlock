@@ -1,5 +1,6 @@
 #include "security.h"
 #include "tpm.h"
+#include "persistence.h"
 #include <bcrypt.h>
 #include <sddl.h>
 #include <strsafe.h>
@@ -13,7 +14,7 @@ constexpr ULONGLONG Second = 10000000ULL;
 
 struct Record {
     DWORD magic = 0x5041544c;
-    DWORD version = 5;
+    DWORD version = 6;
     DWORD iterations = HashIterations;
     DWORD attempts = 0;
     DWORD disabled = 0;
@@ -97,9 +98,7 @@ HRESULT ReadBlob(HKEY key, PCWSTR name, void* output, DWORD length) noexcept {
 }
 
 HRESULT WriteBlob(HKEY key, PCWSTR name, const void* input, DWORD length) noexcept {
-    LSTATUS result = RegSetValueExW(key, name, 0, REG_BINARY, static_cast<const BYTE*>(input), length);
-    if (result == ERROR_SUCCESS) result = RegFlushKey(key);
-    return HRESULT_FROM_WIN32(result);
+    return WriteRegistryBlob(key, name, input, length);
 }
 
 HRESULT Mac(Bundle& bundle, BYTE output[32]) noexcept {
@@ -147,7 +146,7 @@ HRESULT Read(Key& user, PCWSTR sid, Bundle& bundle) noexcept {
     Secret<BYTE, 32> mac;
     hr = Mac(bundle, mac.data());
     Record& record = bundle.record;
-    if (FAILED(hr) || !Equal(mac.data(), bundle.mac, 32) || record.magic != 0x5041544c || record.version != 5 ||
+    if (FAILED(hr) || !Equal(mac.data(), bundle.mac, 32) || record.magic != 0x5041544c || record.version != 6 ||
         record.iterations != HashIterations || record.attempts > 10 || record.disabled > 1 ||
         record.cipherBytes < 4 || record.cipherBytes > sizeof(record.cipher) || record.cipherBytes % 2 ||
         record.tpmMode > 1 ||
@@ -223,6 +222,13 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
     HRESULT hr = AuthenticatedIdentity(name, sid, supplied); if (FAILED(hr)) return hr;
     Lock lock; if (!lock.Acquire()) return E_ACCESSDENIED;
     Key root, user; hr = OpenUser(sid, root, user, true); if (FAILED(hr)) return hr;
+    // Retire the previous generation only after the replacement record commits.
+    Bundle previous;
+    wchar_t previousIdentity[240]{};
+    const bool retirePrevious = SUCCEEDED(Read(user, sid, previous)) && previous.record.tpmMode == 1 &&
+        SUCCEEDED(KeyIdentity(previous.record, previousIdentity));
+    wchar_t createdIdentity[240]{};
+    bool createdTpm = false;
     Bundle bundle;
     hr = StringCchCopyW(bundle.record.user, ARRAYSIZE(bundle.record.user), name);
     if (SUCCEEDED(hr)) hr = StringCchCopyW(bundle.record.sid, ARRAYSIZE(bundle.record.sid), sid);
@@ -235,7 +241,9 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
     // Key management: try TPM-backed key protection first; fall back to baseline.
     Secret<BYTE, 32> aesKey;
     if (SUCCEEDED(hr)) hr = Random(aesKey.data(), 32);
-    if (SUCCEEDED(hr) && tpm::Available()) {
+    const HRESULT probe = SUCCEEDED(hr) ? tpm::Probe() : hr;
+    if (FAILED(probe)) return probe;
+    if (SUCCEEDED(hr) && probe == S_OK) {
         Secret<BYTE, 32> authorization;
         HRESULT tpmHr = DeriveTpmAuthorization(pattern, bundle.record.salt, authorization.data());
         wchar_t identity[240]{};
@@ -243,10 +251,12 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
         if (SUCCEEDED(tpmHr)) tpmHr = tpm::ProtectKey(identity, authorization.data(), aesKey.data(), bundle.record.tpmWrappedKey);
         if (SUCCEEDED(tpmHr)) {
             bundle.record.tpmMode = 1;
+            CopyMemory(createdIdentity, identity, sizeof(identity));
+            createdTpm = true;
         } else {
-            bundle.record.tpmMode = 0;
-            SecureZeroMemory(bundle.record.tpmWrappedKey, sizeof(bundle.record.tpmWrappedKey));
-            CopyMemory(aesKey.data(), bundle.key, 32);
+            // Hardware exists: an operational/authentication failure is not
+            // permission to silently weaken the enrollment to baseline storage.
+            return tpmHr;
         }
     } else if (SUCCEEDED(hr)) {
         bundle.record.tpmMode = 0;
@@ -264,6 +274,11 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
 
     bundle.record.passwordTime = bundle.record.lastSeen = Now();
     if (SUCCEEDED(hr)) hr = Save(user, bundle);
+    if (FAILED(hr) && createdTpm) {
+        const HRESULT cleanup = tpm::DeleteKey(createdIdentity);
+        if (FAILED(cleanup)) return cleanup;
+    }
+    if (SUCCEEDED(hr) && retirePrevious && FAILED(tpm::DeleteKey(previousIdentity))) return S_FALSE;
     return hr;
 }
 
@@ -292,6 +307,36 @@ HRESULT Eligible(PCWSTR sid) noexcept {
     return FAILED(hr) ? hr : Check(root, bundle.record);
 }
 
+HRESULT RemoveEnrollment(PCWSTR name, PCWSTR sid, PCWSTR password) noexcept {
+    HRESULT hr = AuthenticatedIdentity(name, sid, password); if (FAILED(hr)) return hr;
+    Lock lock; if (!lock.Acquire()) return E_ACCESSDENIED;
+    Key root, user; hr = OpenUser(sid, root, user); if (FAILED(hr)) return hr;
+    Bundle bundle; hr = Read(user, sid, bundle); if (FAILED(hr)) return hr;
+    bundle.record.disabled = 1;
+    hr = Save(user, bundle); if (FAILED(hr)) return hr;
+    if (bundle.record.tpmMode) {
+        wchar_t identity[240]{};
+        hr = KeyIdentity(bundle.record, identity);
+        if (SUCCEEDED(hr)) hr = tpm::DeleteKey(identity);
+        if (FAILED(hr)) return hr;
+    }
+    return DeleteRegistryValue(user.value, L"Record");
+}
+
+HRESULT QueryRetryAfter(PCWSTR sid, DWORD* seconds) noexcept {
+    if (!seconds) return E_POINTER;
+    *seconds = 0;
+    Lock lock; if (!lock.Acquire()) return E_ACCESSDENIED;
+    Key root, user; HRESULT hr = OpenUser(sid, root, user); if (FAILED(hr)) return hr;
+    Bundle bundle; hr = Read(user, sid, bundle); if (FAILED(hr)) return hr;
+    const Record& record = bundle.record;
+    const ULONGLONG now = Now();
+    if (record.disabled || record.attempts >= 10 || now < record.lastSeen || now < record.passwordTime ||
+        !record.passwordTime || (kMaxPasswordAge && now - record.passwordTime >= kMaxPasswordAge)) return E_ACCESSDENIED;
+    if (record.until > now) *seconds = static_cast<DWORD>((record.until - now + Second - 1) / Second);
+    return S_OK;
+}
+
 HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* submission) noexcept {
     if (password) password->Clear();
     if (submission) SecureZeroMemory(submission, 16);
@@ -301,9 +346,6 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* sub
     Key root, user; HRESULT hr = OpenUser(sid, root, user); if (FAILED(hr)) return hr;
     Bundle bundle; hr = Read(user, sid, bundle); if (FAILED(hr)) return hr;
     hr = Check(root, bundle.record); if (FAILED(hr)) return hr;
-
-    const DWORD attempts = bundle.record.attempts;
-    const ULONGLONG until = bundle.record.until;
 
     // Reserve an attempt durably before testing a guess. A crash consumes it.
     ++bundle.record.attempts; bundle.record.lastSeen = Now();
@@ -352,7 +394,7 @@ HRESULT FinishSubmission(PCWSTR sid, const BYTE submission[16]) noexcept {
     Key root, user; HRESULT hr = OpenUser(sid, root, user); if (FAILED(hr)) return hr;
     Bundle bundle; hr = Read(user, sid, bundle); if (FAILED(hr)) return hr;
     BYTE empty[16]{};
-    if (!submission || Equal(submission, empty, 16) || !Equal(submission, bundle.record.submission, 16)) return E_ACCESSDENIED;
+    if (!bundle.record.disabled || !submission || Equal(submission, empty, 16) || !Equal(submission, bundle.record.submission, 16)) return E_ACCESSDENIED;
     bundle.record.disabled = 0;
     bundle.record.attempts = 0;
     bundle.record.until = 0;

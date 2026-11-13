@@ -113,6 +113,8 @@ public:
     virtual ~CSampleCredential();
     long                                    _cRef;
     bool _patternReady = false;
+    bool _selected = false;
+    bool _dialogOpen = false;
     patlock::Pattern _pattern;
     patlock::Secret<BYTE, 16> _submission;
     bool _awaitingResult = false;

@@ -12,11 +12,11 @@ struct Pattern final {
     ~Pattern() { Clear(); }
     void Clear() noexcept { SecureZeroMemory(dots.data(), dots.size()); count = 0; }
     bool Contains(BYTE dot) const noexcept {
-        for (size_t i = 0; i < count; ++i) if (dots[i] == dot) return true;
+        for (size_t i = 0; i < count && i < dots.size(); ++i) if (dots[i] == dot) return true;
         return false;
     }
     void Add(BYTE dot) noexcept {
-        if (dot > 8 || Contains(dot) || count >= dots.size()) return;
+        if (dot > 8 || count >= dots.size() || Contains(dot)) return;
         if (count) {
             const int previous = dots[count - 1];
             const int dx = std::abs(previous % 3 - dot % 3);
@@ -26,7 +26,7 @@ struct Pattern final {
                 if (!Contains(middle)) dots[count++] = middle;
             }
         }
-        dots[count++] = dot;
+        if (count < dots.size()) dots[count++] = dot;
     }
     bool Valid() const noexcept {
         if (count < MinimumDots || count > dots.size()) return false;

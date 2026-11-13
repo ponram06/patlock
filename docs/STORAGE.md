@@ -1,5 +1,9 @@
 # Record format, TPM hardening, and password-refresh implementation
 
+Historical implementation notes: use CURRENT_STORAGE.md for the current format 6
+and VM_ACCEPTANCE.md for this candidate's tests. Earlier claims below are not
+evidence of current TPM or runtime behavior.
+
 Current modes:
 - **TPM-hardened (primary when TPM available)**: AES-256 key is wrapped with RSA-2048 OAEP via the Microsoft Platform Crypto Provider (`MS_PLATFORM_CRYPTO_PROVIDER`). The TPM key's usage authorization is bound to the pattern hash (`PCP_USAGEAUTH`). Guessing is rate-limited by the TPM's hardware anti-hammering logic.
 - **Baseline (fallback)**: When no TPM is detected, random 256-bit AES key is stored in the SYSTEM/Administrators-only registry store. BitLocker/device encryption is a prerequisite.

@@ -12,6 +12,25 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-13: Integrated release-candidate implementation pass (record 6)
+- Written: KTM registry transactions and removal; unique TPM generation cleanup
+  and postcommit retirement; explicit no-TPM fallback with operational failures
+  closed; official PCPTool PIN encoding, silent operations and key policy/ACLs.
+- Written: deliberate drag/release UI, inherited DPI and monitor clamping,
+  high-contrast palette, native accessible status/fallback, saved lockout countdown.
+- Written: COM optional-output/bounds handling, timer/credential lifetime guards,
+  exception containment, wiped transient buffers and no hidden password exposure.
+- Written: authenticated --remove, guarded VM build/test command, transaction and
+  provider-contract test targets, VS2022 x64/C++17/static CRT configuration,
+  non-destructive package output checks and public artifact hashes.
+- Static review findings fixed: failed-enrollment TPM generation cleanup and
+  nullable GetSerialization outputs. Syntax/XML/whitespace checks performed.
+- Not executed: builds, CTest, registry/TPM operations, provider installation,
+  screen-reader/DPI/trackpad testing or current-candidate lock-screen sign-in.
+- Human VM action: VM_ACCEPTANCE.md; re-enroll for record 6, run all five test
+  targets, repeat sign-in and fault cases, and TPM_VALIDATION.md. Signing and
+  independent security review are distribution gates, not completed claims.
+
 ### 2026-11-13: Publishing and additional hardening
 - Pushed 989205f successfully to origin/main at the user's request.
 - Written: unique TPM enrollment generations without pre-commit deletion of old

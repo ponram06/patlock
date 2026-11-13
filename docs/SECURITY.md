@@ -14,7 +14,9 @@ Out of scope (be honest about this in the final README):
 
 ## Core trade-off
 The provider must be able to produce the Windows password after a pattern match. So the password is stored in recoverable (encrypted) form.
-Protection comes from: BitLocker/Device Encryption, access-locked storage, TPM binding, lockout, and requiring the full password regularly.
+Protection comes from BitLocker/device encryption, access-locked storage, lockout
+and TPM-backed wrapping where supported. TPM authorization and anti-hammering
+require TPM_VALIDATION.md checks. Option A has no periodic password requirement.
 
 ## Storage design
 Record contents: format version, account name, salt, PBKDF2 hash of the pattern, encrypted password (AES-GCM, with nonce and tag),
@@ -26,7 +28,8 @@ Baseline:
 - Pattern verified with PBKDF2-HMAC-SHA256, per-user random 16-byte salt, high iteration count, constant-time compare.
 
 Hardened:
-- TPM-backed key requiring an authorization value derived from the pattern, so guesses are rate-limited by hardware.
+- TPM-backed key supplied a separate pattern authorization. Hardware rate limiting
+  is not asserted until verified on the target TPM/KSP.
 - Fall back to baseline if no TPM. Document which mode is active.
 
 ## Rules for code

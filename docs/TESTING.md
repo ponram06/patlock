@@ -52,7 +52,8 @@ Run in the Windows 11 VM first (take a snapshot before each install). Tick each 
 ## Security checks
 - [ ] No secrets in any log file
 - [ ] Plaintext buffers wiped (code review)
-- [ ] Offline disk cannot yield the password when BitLocker is on
+- [ ] Offline encrypted volume remains locked without recovery/unlock material;
+      record BitLocker configuration and test conditions without absolute claims
 - [ ] Code review of storage, serialization and lockout code done by the human
 
 ## Real hardware (Phase 7)

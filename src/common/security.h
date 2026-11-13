@@ -22,10 +22,12 @@ HRESULT DeriveTpmAuthorization(const Pattern& pattern, const BYTE salt[16], BYTE
 HRESULT ValidatePassword(PCWSTR user, PCWSTR password, wchar_t (&sid)[184]) noexcept;
 HRESULT Enroll(PCWSTR user, PCWSTR sid, PCWSTR password, const Pattern& pattern) noexcept;
 HRESULT Refresh(PCWSTR user, PCWSTR sid, PCWSTR password) noexcept;
+HRESULT RemoveEnrollment(PCWSTR user, PCWSTR sid, PCWSTR password) noexcept;
 HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password = nullptr, BYTE* submission = nullptr) noexcept;
 HRESULT FinishSubmission(PCWSTR sid, const BYTE submission[16]) noexcept;
 HRESULT Disable(PCWSTR sid) noexcept;
 HRESULT Eligible(PCWSTR sid) noexcept;
+HRESULT QueryRetryAfter(PCWSTR sid, DWORD* seconds) noexcept;
 // Query whether the record for a SID uses TPM-backed key storage.
 // Returns S_OK if TPM mode, S_FALSE if baseline, or failure if no record.
 HRESULT QueryTpmMode(PCWSTR sid) noexcept;

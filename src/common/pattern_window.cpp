@@ -1,5 +1,4 @@
 #include "pattern_window.h"
-#include "arming_gate.h"
 #include <windows.h>
 #include <windowsx.h>
 #include <gdiplus.h>
@@ -22,16 +21,11 @@ constexpr int GridSpacing = 62;
 constexpr int GridTopY    = 80;    // Center Y of row 0 inside the card
 constexpr int HitRadius   = 28;
 
-RECT SigninLinkRect(int windowWidth) noexcept {
-    const int linkWidth = 180;
-    const int left = (windowWidth - linkWidth) / 2;
-    return {left, 246, left + linkWidth, 274};
-}
-
 // ── State ────────────────────────────────────────────────────────────────────
 
 enum class VisualState {
     Drawing,
+    Checking,
     Success,
     ErrorWrong,
     ErrorLockout,
@@ -45,11 +39,63 @@ struct State {
     VisualState visual = VisualState::Drawing;
     POINT previous{};
     PatternVerifier verifier = nullptr;
+    RetryDelay retryDelay = nullptr;
+    DWORD retrySeconds = 0;
+    bool passwordRequired = false;
     int hoverDot = -1;
-    bool hoverLink = false;
-    ArmingGate gate;
-    int pendingStartDot = -1;
+    HWND fallback = nullptr;
+    HWND status = nullptr;
+    HFONT font = nullptr;
+    HBRUSH background = nullptr;
+    bool highContrast = false;
+    double scale = 1.0;
 };
+
+Gdiplus::Color Palette(const State& state, Gdiplus::Color normal, int systemColor) noexcept {
+    if (!state.highContrast) return normal;
+    const COLORREF color = GetSysColor(systemColor);
+    return Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color));
+}
+
+bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexcept {
+    MONITORINFO monitor{};
+    monitor.cbSize = sizeof(monitor);
+    const HMONITOR target = suggested ? MonitorFromRect(suggested, MONITOR_DEFAULTTONEAREST)
+        : MonitorFromWindow(GetWindow(window, GW_OWNER), MONITOR_DEFAULTTONEAREST);
+    if (!GetMonitorInfoW(target, &monitor) || dpi == 0) return false;
+    const RECT area = monitor.rcWork;
+    const int width = area.right - area.left;
+    const int height = area.bottom - area.top;
+    state.scale = (std::min)(static_cast<double>(dpi) / 96.0,
+        (std::min)(static_cast<double>(width - 16) / WindowW, static_cast<double>(height - 16) / WindowH));
+    if (state.scale < 0.5) return false; // Decline when controls cannot remain usable.
+    const int w = static_cast<int>(WindowW * state.scale);
+    const int h = static_cast<int>(WindowH * state.scale);
+    const int preferredX = suggested ? suggested->left : area.left + (width - w) / 2;
+    const int preferredY = suggested ? suggested->top : area.top + height / 2 + static_cast<int>(35 * state.scale);
+    const int x = (std::max)(static_cast<int>(area.left), (std::min)(preferredX, static_cast<int>(area.right) - w));
+    const int y = (std::max)(static_cast<int>(area.top), (std::min)(preferredY, static_cast<int>(area.bottom) - h));
+    HIGHCONTRASTW contrast{};
+    contrast.cbSize = sizeof(contrast);
+    if (!SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0)) return false;
+    state.highContrast = (contrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
+    HBRUSH brush = CreateSolidBrush(state.highContrast ? GetSysColor(COLOR_WINDOW) : RGB(18, 22, 30));
+    HFONT font = CreateFontW(-static_cast<int>(14 * state.scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+    if (!brush || !font) { if (brush) DeleteObject(brush); if (font) DeleteObject(font); return false; }
+    SendMessageW(state.fallback, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    SendMessageW(state.status, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    if (state.font) DeleteObject(state.font);
+    if (state.background) DeleteObject(state.background);
+    state.font = font;
+    state.background = brush;
+    auto scaled = [&state](int value) { return static_cast<int>(value * state.scale); };
+    if (!SetWindowPos(window, HWND_TOP, x, y, w, h, SWP_NOACTIVATE) ||
+        !MoveWindow(state.status, scaled(12), scaled(16), scaled(256), scaled(34), TRUE) ||
+        !MoveWindow(state.fallback, scaled(32), scaled(244), scaled(216), scaled(30), TRUE)) return false;
+    InvalidateRect(window, nullptr, TRUE);
+    return true;
+}
 
 struct Layout {
     int x;
@@ -62,8 +108,9 @@ Layout Grid(HWND window) noexcept {
     RECT r{};
     GetClientRect(window, &r);
     const int cw = static_cast<int>(r.right);
-    const int startX = cw / 2 - GridSpacing;
-    return {startX, GridTopY, GridSpacing, HitRadius};
+    const double scale = static_cast<double>(cw) / WindowW;
+    const int spacing = static_cast<int>(GridSpacing * scale);
+    return {cw / 2 - spacing, static_cast<int>(GridTopY * scale), spacing, static_cast<int>(HitRadius * scale)};
 }
 
 POINT Dot(Layout grid, int dot) noexcept {
@@ -81,10 +128,38 @@ int DotAt(HWND window, POINT pt, int threshold) noexcept {
     return -1;
 }
 
-POINT CursorClient(HWND window) noexcept {
-    POINT cur{-10000, -10000};
-    if (GetCursorPos(&cur)) ScreenToClient(window, &cur);
-    return cur;
+void UpdateStatus(HWND window, const State& state) noexcept {
+    wchar_t text[96] = L"Press, drag, then release to submit";
+    if (state.visual == VisualState::Success) StringCchCopyW(text, ARRAYSIZE(text), L"Pattern accepted");
+    else if (state.visual == VisualState::Checking) StringCchCopyW(text, ARRAYSIZE(text), L"Checking pattern...");
+    else if (state.visual == VisualState::ErrorTooShort) StringCchPrintfW(text, ARRAYSIZE(text), L"Connect at least %zu dots", MinimumDots);
+    else if (state.visual == VisualState::ErrorWrong) StringCchCopyW(text, ARRAYSIZE(text), L"Incorrect pattern");
+    else if (state.visual == VisualState::ErrorLockout) {
+        if (state.passwordRequired) StringCchCopyW(text, ARRAYSIZE(text), L"Pattern unavailable. Use Password.");
+        else StringCchPrintfW(text, ARRAYSIZE(text), L"Try again in %lu seconds", state.retrySeconds);
+    } else if (state.pattern.count) {
+        StringCchPrintfW(text, ARRAYSIZE(text), L"%zu dots connected; release to submit", state.pattern.count);
+    }
+    wchar_t old[96]{};
+    GetWindowTextW(state.status, old, ARRAYSIZE(old));
+    if (lstrcmpW(old, text) != 0) {
+        SetWindowTextW(state.status, text);
+        NotifyWinEvent(EVENT_OBJECT_NAMECHANGE, state.status, OBJID_CLIENT, 0);
+    }
+    InvalidateRect(window, nullptr, FALSE);
+}
+
+bool RefreshRetry(HWND window, State& state) noexcept {
+    state.passwordRequired = true;
+    state.retrySeconds = 0;
+    if (state.retryDelay) {
+        HRESULT hr = E_FAIL;
+        try { hr = state.retryDelay(&state.retrySeconds); }
+        catch (...) { state.pattern.Clear(); EndDialog(window, -1); return false; }
+        if (hr == S_OK) state.passwordRequired = false;
+        else if (hr != E_ACCESSDENIED) { state.pattern.Clear(); EndDialog(window, -1); return false; }
+    }
+    return true;
 }
 
 void ResetStroke(HWND window, State& state) noexcept {
@@ -97,12 +172,8 @@ void ResetStroke(HWND window, State& state) noexcept {
     state.dragging = false;
     state.visual = VisualState::Drawing;
     state.hoverDot = -1;
-    state.pendingStartDot = -1;
-    ReleaseCapture();
-    const POINT cur = CursorClient(window);
-    const Layout grid = Grid(window);
-    state.gate.Disarm(cur.x, cur.y, DotAt(window, cur, grid.hitRadius) >= 0);
-    InvalidateRect(window, nullptr, FALSE);
+    if (GetCapture() == window) ReleaseCapture();
+    UpdateStatus(window, state);
 }
 
 void Track(HWND window, State& state, POINT to) noexcept {
@@ -125,7 +196,7 @@ void Track(HWND window, State& state, POINT to) noexcept {
     std::sort(hits, hits + count, [](const Hit& a, const Hit& b) { return a.t < b.t; });
     for (size_t i = 0; i < count; ++i) state.pattern.Add(hits[i].dot);
     state.previous = to;
-    InvalidateRect(window, nullptr, FALSE);
+    UpdateStatus(window, state);
 }
 
 void FinishPattern(HWND window, State& state) noexcept {
@@ -139,9 +210,9 @@ void FinishPattern(HWND window, State& state) noexcept {
             state.pattern.Clear();
             state.dragging = false;
             state.visual = VisualState::ErrorTooShort;
-            ReleaseCapture();
-            InvalidateRect(window, nullptr, FALSE);
-            SetTimer(window, 5, 1000, nullptr);
+            if (GetCapture() == window) ReleaseCapture();
+            UpdateStatus(window, state);
+            if (!SetTimer(window, 5, 1000, nullptr)) EndDialog(window, -1);
         } else {
             ResetStroke(window, state);
         }
@@ -149,27 +220,36 @@ void FinishPattern(HWND window, State& state) noexcept {
     }
 
     state.dragging = false;
-    ReleaseCapture();
+    if (GetCapture() == window) ReleaseCapture();
 
     if (state.verifier) {
-        VerifyResult result = state.verifier(state.pattern);
+        state.visual = VisualState::Checking;
+        UpdateStatus(window, state);
+        UpdateWindow(state.status);
+        UpdateWindow(window);
+        VerifyResult result = VerifyResult::Error;
+        try { result = state.verifier(state.pattern); }
+        catch (...) { state.pattern.Clear(); EndDialog(window, -1); return; }
+        if (result == VerifyResult::Error) { state.pattern.Clear(); EndDialog(window, -1); return; }
         if (result == VerifyResult::Success) {
             state.visual = VisualState::Success;
-            InvalidateRect(window, nullptr, FALSE);
-            SetTimer(window, 4, 120, nullptr);
+            UpdateStatus(window, state);
+            if (!SetTimer(window, 4, 120, nullptr)) { state.pattern.Clear(); EndDialog(window, -1); }
         } else if (result == VerifyResult::Lockout) {
             state.visual = VisualState::ErrorLockout;
-            InvalidateRect(window, nullptr, FALSE);
-            SetTimer(window, 6, 1200, nullptr);
+            state.pattern.Clear();
+            if (!RefreshRetry(window, state)) return;
+            UpdateStatus(window, state);
+            if (!state.passwordRequired && !SetTimer(window, 6, 1000, nullptr)) EndDialog(window, -1);
         } else {
             // Wrong pattern: flash red for 800ms, then reset stroke for instant retry
             state.visual = VisualState::ErrorWrong;
-            InvalidateRect(window, nullptr, FALSE);
-            SetTimer(window, 6, 800, nullptr);
+            UpdateStatus(window, state);
+            if (!SetTimer(window, 6, 800, nullptr)) { state.pattern.Clear(); EndDialog(window, -1); }
         }
     } else {
         state.visual = VisualState::Success;
-        InvalidateRect(window, nullptr, FALSE);
+        UpdateStatus(window, state);
         EndDialog(window, IDOK);
     }
 }
@@ -195,28 +275,29 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         // Transparent layered window for floating rounded corners
         LONG_PTR exStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
         SetWindowLongPtrW(window, GWL_EXSTYLE, exStyle | WS_EX_LAYERED);
-        SetLayeredWindowAttributes(window, TransparentKey, 0, LWA_COLORKEY);
+        if (!SetLayeredWindowAttributes(window, TransparentKey, 0, LWA_COLORKEY)) { EndDialog(window, -1); return TRUE; }
 
-        // Position: centered horizontally, placed 35px below screen center
-        // Sits cleanly below 'testuser' without any overlap!
-        MONITORINFO monitor{}; monitor.cbSize = sizeof(monitor);
-        if (!GetMonitorInfoW(MonitorFromWindow(GetWindow(window, GW_OWNER), MONITOR_DEFAULTTOPRIMARY), &monitor)) {
+        state->fallback = CreateWindowExW(0, L"BUTTON", L"&Other sign-in options",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0,
+            window, reinterpret_cast<HMENU>(IDCANCEL), nullptr, nullptr);
+        state->status = CreateWindowExW(0, L"STATIC", L"Press, drag, then release to submit",
+            WS_CHILD | WS_VISIBLE | SS_CENTER, 0, 0, 0, 0,
+            window, reinterpret_cast<HMENU>(1001), nullptr, nullptr);
+        if (!state->fallback || !state->status || !Configure(window, *state, GetDpiForWindow(window), nullptr)) {
             EndDialog(window, -1); return TRUE;
         }
-        const RECT area = monitor.rcWork;
-        const int posX = area.left + (area.right - area.left - WindowW) / 2;
-        const int preferredY = area.top + (area.bottom - area.top) / 2 + 35;
-        const int posY = (std::max)(static_cast<int>(area.top), (std::min)(preferredY, static_cast<int>(area.bottom) - WindowH - 16));
-        SetWindowPos(window, HWND_TOP, posX, posY, WindowW, WindowH, SWP_SHOWWINDOW);
-
-        const POINT cur = CursorClient(window);
-        const Layout grid = Grid(window);
-        state->gate.Disarm(cur.x, cur.y, DotAt(window, cur, grid.hitRadius) >= 0);
-        state->pendingStartDot = -1;
-        state->hoverLink = false;
+        SetFocus(state->fallback);
+        if (state->retryDelay) {
+            if (!RefreshRetry(window, *state)) return FALSE;
+            if (state->passwordRequired || state->retrySeconds) {
+                state->visual = VisualState::ErrorLockout;
+                UpdateStatus(window, *state);
+                if (!state->passwordRequired && !SetTimer(window, 6, 1000, nullptr)) { EndDialog(window, -1); return FALSE; }
+            }
+        }
 
         if (!SetTimer(window, 1, 120000, nullptr)) EndDialog(window, -1);
-        return TRUE;
+        return FALSE; // Focus was explicitly assigned to the native fallback button.
     }
     if (!state) return FALSE;
 
@@ -228,18 +309,8 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
     case WM_TIMER:
         if (wp == 1) {
             state->pattern.Clear();
-            ReleaseCapture();
+            if (GetCapture() == window) ReleaseCapture();
             EndDialog(window, IDCANCEL);
-            return TRUE;
-        }
-        if (wp == 2) {
-            KillTimer(window, 2);
-            FinishPattern(window, *state);
-            return TRUE;
-        }
-        if (wp == 3) {
-            KillTimer(window, 3);
-            FinishPattern(window, *state);
             return TRUE;
         }
         if (wp == 4) {
@@ -254,126 +325,68 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         }
         if (wp == 6) {
             KillTimer(window, 6);
-            if (state->visual == VisualState::ErrorWrong || state->visual == VisualState::ErrorLockout) {
-                ResetStroke(window, *state);
-            }
-            return TRUE;
-        }
-        if (wp == 7) {
-            KillTimer(window, 7);
-            if (state->pendingStartDot >= 0 && !state->dragging && state->visual == VisualState::Drawing &&
-                state->gate.Armed()) {
-                state->dragging = true;
-                state->pattern.Clear();
-                state->pattern.Add(static_cast<BYTE>(state->pendingStartDot));
-                state->pendingStartDot = -1;
-                state->previous = CursorClient(window);
-                SetCapture(window);
-                InvalidateRect(window, nullptr, FALSE);
-            }
+            if (state->visual == VisualState::ErrorLockout) {
+                if (!RefreshRetry(window, *state)) return TRUE;
+                if (!state->passwordRequired && state->retrySeconds == 0) ResetStroke(window, *state);
+                else {
+                    UpdateStatus(window, *state);
+                    if (!state->passwordRequired && !SetTimer(window, 6, 1000, nullptr)) EndDialog(window, -1);
+                }
+            } else if (state->visual == VisualState::ErrorWrong) ResetStroke(window, *state);
             return TRUE;
         }
         return TRUE;
 
     case WM_DESTROY:
+        if (state->font) { DeleteObject(state->font); state->font = nullptr; }
+        if (state->background) { DeleteObject(state->background); state->background = nullptr; }
         for (UINT_PTR id = 1; id <= 7; ++id) KillTimer(window, id);
         return TRUE;
 
     case WM_ERASEBKGND:
         return TRUE;
 
-    case WM_SETCURSOR: {
-        const POINT cur = CursorClient(window);
-        const RECT linkRect = SigninLinkRect(WindowW);
-        if (PtInRect(&linkRect, cur)) {
-            SetCursor(LoadCursor(nullptr, IDC_HAND));
-            return TRUE;
-        }
-        break;
-    }
-
     case WM_LBUTTONDOWN: {
         const POINT current = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
 
-        // Click on "Other sign-in options" text link -> close grid immediately
-        const RECT linkRect = SigninLinkRect(WindowW);
-        if (PtInRect(&linkRect, current)) {
-            state->pattern.Clear();
-            ReleaseCapture();
-            EndDialog(window, IDCANCEL);
-            return TRUE;
-        }
-
-        if (state->visual != VisualState::Drawing) return TRUE;
-
-        if (state->dragging && state->pattern.Valid()) {
-            FinishPattern(window, *state);
-            return TRUE;
-        }
+        if (state->visual != VisualState::Drawing || state->dragging) return TRUE;
 
         const Layout grid = Grid(window);
         const int dot = DotAt(window, current, grid.hitRadius);
         if (dot < 0) return TRUE;
 
-        state->pendingStartDot = -1;
         KillTimer(window, 7);
         state->pattern.Clear();
         state->visual = VisualState::Drawing;
         state->dragging = true;
         state->previous = current;
         SetCapture(window);
+        if (GetCapture() != window) { ResetStroke(window, *state); return TRUE; }
         state->pattern.Add(static_cast<BYTE>(dot));
-        InvalidateRect(window, nullptr, FALSE);
+        UpdateStatus(window, *state);
         return TRUE;
     }
 
     case WM_MOUSEMOVE: {
         const POINT current = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
 
-        // Hover tracking for "Other sign-in options" link
-        const RECT linkRect = SigninLinkRect(WindowW);
-        const bool onLink = PtInRect(&linkRect, current) != FALSE;
-        if (onLink != state->hoverLink) {
-            state->hoverLink = onLink;
-            InvalidateRect(window, &linkRect, FALSE);
-        }
-
         if (state->visual != VisualState::Drawing) return TRUE;
-
         const Layout grid = Grid(window);
-        const int dot = DotAt(window, current, grid.hitRadius);
-        state->gate.Observe(current.x, current.y);
-
-        if (!state->dragging) {
-            const bool armed = state->gate.Armed();
-            state->hoverDot = armed ? dot : -1;
-            if (armed && dot >= 0) {
-                if (state->pendingStartDot != dot) {
-                    state->pendingStartDot = dot;
-                    SetTimer(window, 7, 120, nullptr);
-                }
-            } else {
-                state->pendingStartDot = -1;
-                KillTimer(window, 7);
+        state->hoverDot = DotAt(window, current, grid.hitRadius);
+        if (state->dragging) {
+            if (!(wp & MK_LBUTTON) || GetCapture() != window) {
+                ResetStroke(window, *state);
+                return TRUE;
             }
-            InvalidateRect(window, nullptr, FALSE);
-        } else {
-            state->hoverDot = dot;
             Track(window, *state, current);
-            KillTimer(window, 2);
-            KillTimer(window, 3);
-            if (state->pattern.Valid()) {
-                SetTimer(window, 2, 350, nullptr);
-            } else if (state->pattern.count > 0) {
-                SetTimer(window, 3, 1800, nullptr);
-            }
         }
+        UpdateStatus(window, *state);
         return TRUE;
     }
 
     case WM_LBUTTONUP: {
         if (state->visual != VisualState::Drawing) return TRUE;
-        if (state->dragging) {
+        if (state->dragging && GetCapture() == window) {
             Track(window, *state, {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
             FinishPattern(window, *state);
         }
@@ -387,20 +400,40 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
     case WM_COMMAND:
         if (LOWORD(wp) == IDCANCEL) {
-            if (state->pattern.count > 0 || state->dragging) {
-                ResetStroke(window, *state);
-                return TRUE;
-            }
             state->pattern.Clear();
-            ReleaseCapture();
+            if (GetCapture() == window) ReleaseCapture();
             EndDialog(window, IDCANCEL);
             return TRUE;
         }
         return FALSE;
 
+    case WM_DPICHANGED:
+        if (state->visual == VisualState::Drawing) ResetStroke(window, *state);
+        if (!Configure(window, *state, LOWORD(wp), reinterpret_cast<const RECT*>(lp))) EndDialog(window, -1);
+        return TRUE;
+
+    case WM_SETTINGCHANGE:
+    case WM_SYSCOLORCHANGE:
+        if (state->visual == VisualState::Drawing) ResetStroke(window, *state);
+        if (!Configure(window, *state, GetDpiForWindow(window), nullptr)) EndDialog(window, -1);
+        return TRUE;
+
+    case WM_CTLCOLORSTATIC:
+        if (reinterpret_cast<HWND>(lp) == state->status) {
+            HDC dc = reinterpret_cast<HDC>(wp);
+            SetTextColor(dc, state->highContrast ? GetSysColor(COLOR_WINDOWTEXT) : RGB(210, 218, 235));
+            SetBkColor(dc, state->highContrast ? GetSysColor(COLOR_WINDOW) : RGB(18, 22, 30));
+            return reinterpret_cast<INT_PTR>(state->background);
+        }
+        break;
+
+    case WM_ACTIVATE:
+        if (LOWORD(wp) == WA_INACTIVE && state->dragging) ResetStroke(window, *state);
+        break;
+
     case WM_CLOSE:
         state->pattern.Clear();
-        ReleaseCapture();
+        if (GetCapture() == window) ReleaseCapture();
         EndDialog(window, IDCANCEL);
         return TRUE;
 
@@ -408,33 +441,48 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
     case WM_PAINT: {
         PAINTSTRUCT paint{};
         HDC hdc = BeginPaint(window, &paint);
-        RECT rect{};
-        GetClientRect(window, &rect);
+        RECT physical{};
+        GetClientRect(window, &physical);
+        RECT rect{0, 0, WindowW, WindowH};
 
         // Double buffer
         HDC memDC = CreateCompatibleDC(hdc);
-        HBITMAP memBmp = CreateCompatibleBitmap(hdc, rect.right, rect.bottom);
+        HBITMAP memBmp = CreateCompatibleBitmap(hdc, physical.right, physical.bottom);
+        if (!memDC || !memBmp) {
+            if (memBmp) DeleteObject(memBmp);
+            if (memDC) DeleteDC(memDC);
+            EndPaint(window, &paint);
+            state->pattern.Clear(); EndDialog(window, -1); return TRUE;
+        }
         HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
+        if (!oldBmp || oldBmp == HGDI_ERROR) {
+            DeleteObject(memBmp); DeleteDC(memDC); EndPaint(window, &paint);
+            state->pattern.Clear(); EndDialog(window, -1); return TRUE;
+        }
 
         // 1) Fill outside with TransparentKey (outer margin)
         HBRUSH keyBrush = CreateSolidBrush(TransparentKey);
-        FillRect(memDC, &rect, keyBrush);
-        DeleteObject(keyBrush);
+        const bool filled = keyBrush && FillRect(memDC, &physical, keyBrush);
+        if (keyBrush) DeleteObject(keyBrush);
+        if (!filled) {
+            SelectObject(memDC, oldBmp); DeleteObject(memBmp); DeleteDC(memDC); EndPaint(window, &paint);
+            state->pattern.Clear(); EndDialog(window, -1); return TRUE;
+        }
 
         {
             Gdiplus::Graphics g(memDC);
+            g.ScaleTransform(static_cast<float>(state->scale), static_cast<float>(state->scale));
             g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
 
-            // 2) Draw solid midnight-slate card with rounded corners:
-            // This completely COVERS and HIDES any background LogonUI icons!
+            // Draw the existing rounded card, using system colors in high contrast.
             Gdiplus::GraphicsPath cardPath;
             AddRoundedRect(cardPath, Gdiplus::RectF(6.0f, 6.0f, rect.right - 12.0f, rect.bottom - 12.0f), 20.0f);
 
-            Gdiplus::SolidBrush cardBgBrush(Gdiplus::Color(255, 18, 22, 30));
+            Gdiplus::SolidBrush cardBgBrush(Palette(*state, Gdiplus::Color(255, 18, 22, 30), COLOR_WINDOW));
             g.FillPath(&cardBgBrush, &cardPath);
 
-            Gdiplus::Pen cardBorderPen(Gdiplus::Color(160, 56, 64, 82), 1.0f);
+            Gdiplus::Pen cardBorderPen(Palette(*state, Gdiplus::Color(160, 56, 64, 82), COLOR_WINDOWTEXT), 1.0f);
             g.DrawPath(&cardBorderPen, &cardPath);
 
             // ── Colors by state ──────────────────────────────────────────────
@@ -443,63 +491,19 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             Gdiplus::Color discBg(255, 12, 48, 96);
             Gdiplus::Color coreColor(255, 255, 255, 255);
 
-            wchar_t statusMsg[64] = L"Draw pattern to unlock";
-            Gdiplus::Color statusColor(255, 160, 172, 195);
-
-            if (state->visual == VisualState::Drawing) {
-                if (state->pattern.count > 0) {
-                    if (state->pattern.count < 5) {
-                        StringCchPrintfW(statusMsg, ARRAYSIZE(statusMsg), L"%zu / 5 dots connected", state->pattern.count);
-                        statusColor = Gdiplus::Color(255, 90, 205, 255);
-                    } else {
-                        StringCchPrintfW(statusMsg, ARRAYSIZE(statusMsg), L"%zu dots connected", state->pattern.count);
-                        statusColor = Gdiplus::Color(255, 50, 220, 125);
-                    }
-                } else if (!state->gate.Armed()) {
-                    StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Move pointer away to start");
-                    statusColor = Gdiplus::Color(255, 255, 195, 80);
-                }
-            } else if (state->visual == VisualState::Success) {
-                    StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Pattern accepted");
-                statusColor = Gdiplus::Color(255, 46, 213, 115);
-                lineColor   = Gdiplus::Color(255, 46, 213, 115);
-                ringColor   = Gdiplus::Color(255, 46, 213, 115);
-                discBg      = Gdiplus::Color(255, 18, 65, 40);
-                coreColor   = Gdiplus::Color(255, 240, 255, 245);
-            } else if (state->visual == VisualState::ErrorWrong) {
-                StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Incorrect pattern");
-                statusColor = Gdiplus::Color(255, 255, 75, 75);
-                lineColor   = Gdiplus::Color(255, 255, 75, 75);
-                ringColor   = Gdiplus::Color(255, 255, 75, 75);
-                discBg      = Gdiplus::Color(255, 70, 20, 25);
-                coreColor   = Gdiplus::Color(255, 255, 225, 230);
-            } else if (state->visual == VisualState::ErrorTooShort) {
-                StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Connect at least 5 dots");
-                statusColor = Gdiplus::Color(255, 255, 75, 75);
-                lineColor   = Gdiplus::Color(255, 255, 75, 75);
-                ringColor   = Gdiplus::Color(255, 255, 75, 75);
-                discBg      = Gdiplus::Color(255, 70, 20, 25);
-                coreColor   = Gdiplus::Color(255, 255, 225, 230);
-            } else if (state->visual == VisualState::ErrorLockout) {
-                StringCchCopyW(statusMsg, ARRAYSIZE(statusMsg), L"Locked out. Wait a moment.");
-                statusColor = Gdiplus::Color(255, 255, 75, 75);
-                lineColor   = Gdiplus::Color(255, 255, 75, 75);
-                ringColor   = Gdiplus::Color(255, 255, 75, 75);
-                discBg      = Gdiplus::Color(255, 70, 20, 25);
-                coreColor   = Gdiplus::Color(255, 255, 225, 230);
+            if (state->visual == VisualState::Success) {
+                lineColor = ringColor = Gdiplus::Color(255, 46, 213, 115);
+                discBg = Gdiplus::Color(255, 18, 65, 40);
+            } else if (state->visual == VisualState::ErrorWrong || state->visual == VisualState::ErrorTooShort || state->visual == VisualState::ErrorLockout) {
+                lineColor = ringColor = Gdiplus::Color(255, 255, 75, 75);
+                discBg = Gdiplus::Color(255, 70, 20, 25);
             }
-
-            // ── Top Subtitle Status ──────────────────────────────────────────
-            Gdiplus::Font statusFont(L"Segoe UI", 10.5f, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
-            Gdiplus::SolidBrush statusBrush(statusColor);
-            Gdiplus::StringFormat centerFmt;
-            centerFmt.SetAlignment(Gdiplus::StringAlignmentCenter);
-            centerFmt.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-
-            Gdiplus::RectF statusRect(0.0f, 16.0f, static_cast<float>(rect.right), 26.0f);
-            g.DrawString(statusMsg, -1, &statusFont, statusRect, &centerFmt, &statusBrush);
-
-            const Layout grid = Grid(window);
+            if (state->highContrast) {
+                lineColor = ringColor = Palette(*state, lineColor, COLOR_HIGHLIGHT);
+                coreColor = Palette(*state, coreColor, COLOR_HIGHLIGHTTEXT);
+                discBg = Palette(*state, discBg, COLOR_HIGHLIGHT);
+            }
+            const Layout grid{WindowW / 2 - GridSpacing, GridTopY, GridSpacing, HitRadius};
 
             // ── Anti-Aliased Connecting Lines with Rounded Caps ──────────────
             Gdiplus::Pen linePen(lineColor, 5.0f);
@@ -515,11 +519,11 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 }
                 if (state->dragging && state->visual == VisualState::Drawing) {
                     POINT last = Dot(grid, state->pattern.dots[state->pattern.count - 1]);
-                    g.DrawLine(&linePen, last.x, last.y, state->previous.x, state->previous.y);
+                    g.DrawLine(&linePen, last.x, last.y, static_cast<int>(state->previous.x / state->scale), static_cast<int>(state->previous.y / state->scale));
                 }
             }
 
-            // ── 9 Smooth Anti-Aliased Floating Dots (Mockup Match!) ──────────
+            // Draw the nine dots.
             for (BYTE i = 0; i < 9; ++i) {
                 const POINT p = Dot(grid, i);
                 const bool visited = !state->hide && state->pattern.Contains(i);
@@ -539,47 +543,39 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 } else if (hovered) {
                     // Hovered dot: cyan accent ring
                     float rOut = 13.5f;
-                    Gdiplus::SolidBrush db(Gdiplus::Color(255, 18, 48, 88));
+                    Gdiplus::SolidBrush db(Palette(*state, Gdiplus::Color(255, 18, 48, 88), COLOR_WINDOW));
                     g.FillEllipse(&db, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
-                    Gdiplus::Pen hp(Gdiplus::Color(255, 0, 160, 255), 2.0f);
+                    Gdiplus::Pen hp(Palette(*state, Gdiplus::Color(255, 0, 160, 255), COLOR_HIGHLIGHT), 2.0f);
                     g.DrawEllipse(&hp, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
 
                     float rIn = 4.5f;
-                    Gdiplus::SolidBrush cb(Gdiplus::Color(255, 210, 235, 255));
+                    Gdiplus::SolidBrush cb(Palette(*state, Gdiplus::Color(255, 210, 235, 255), COLOR_WINDOWTEXT));
                     g.FillEllipse(&cb, p.x - rIn, p.y - rIn, 2.0f * rIn, 2.0f * rIn);
                 } else {
                     // Idle dot: clean, smooth solid dark circle
                     float r = 12.0f;
-                    Gdiplus::SolidBrush dotBrush(Gdiplus::Color(255, 34, 38, 50));
+                    Gdiplus::SolidBrush dotBrush(Palette(*state, Gdiplus::Color(255, 34, 38, 50), COLOR_WINDOW));
                     g.FillEllipse(&dotBrush, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
 
-                    Gdiplus::Pen dotRim(Gdiplus::Color(255, 108, 122, 148), 1.0f);
+                    Gdiplus::Pen dotRim(Palette(*state, Gdiplus::Color(255, 108, 122, 148), COLOR_WINDOWTEXT), 1.0f);
                     g.DrawEllipse(&dotRim, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
 
                     // Small subtle pearl center pip
                     float rPip = 2.5f;
-                    Gdiplus::SolidBrush pipBrush(Gdiplus::Color(255, 175, 188, 211));
+                    Gdiplus::SolidBrush pipBrush(Palette(*state, Gdiplus::Color(255, 175, 188, 211), COLOR_WINDOWTEXT));
                     g.FillEllipse(&pipBrush, p.x - rPip, p.y - rPip, 2.0f * rPip, 2.0f * rPip);
                 }
             }
 
-            // ── "Other sign-in options" Link at Bottom ───────────────────────
-            Gdiplus::Font linkFont(L"Segoe UI", 10.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPoint);
-            Gdiplus::Color linkColor = state->hoverLink
-                ? Gdiplus::Color(255, 255, 255, 255)
-                : Gdiplus::Color(255, 210, 218, 235);
-            Gdiplus::SolidBrush linkBrush(linkColor);
-
-            Gdiplus::RectF linkRect(0.0f, 244.0f, static_cast<float>(rect.right), 26.0f);
-            g.DrawString(L"Other sign-in options", -1, &linkFont, linkRect, &centerFmt, &linkBrush);
         }
 
         // Blit double buffer to screen
-        BitBlt(hdc, 0, 0, rect.right, rect.bottom, memDC, 0, 0, SRCCOPY);
+        const BOOL copied = BitBlt(hdc, 0, 0, physical.right, physical.bottom, memDC, 0, 0, SRCCOPY);
         SelectObject(memDC, oldBmp);
         DeleteObject(memBmp);
         DeleteDC(memDC);
         EndPaint(window, &paint);
+        if (!copied) { state->pattern.Clear(); EndDialog(window, -1); }
         return TRUE;
     }
     }
@@ -593,7 +589,8 @@ HRESULT DrawPatternInteractive(
     HWND owner,
     bool hideTrail,
     const PatternVerifier& verifier,
-    Pattern& output) noexcept
+    Pattern& output,
+    const RetryDelay& retryDelay) noexcept
 {
     output.Clear();
 
@@ -604,20 +601,23 @@ HRESULT DrawPatternInteractive(
 
     alignas(DWORD) BYTE buffer[sizeof(DLGTEMPLATE) + 3 * sizeof(WORD)]{};
     auto* dialog = reinterpret_cast<DLGTEMPLATE*>(buffer);
-    dialog->style = WS_POPUP;
+    dialog->style = WS_POPUP | WS_CLIPCHILDREN;
     dialog->cx = 200;
     dialog->cy = 200;
     State state;
     state.hide = hideTrail;
-    state.verifier = verifier;
+    try { state.verifier = verifier; state.retryDelay = retryDelay; }
+    catch (...) { Gdiplus::GdiplusShutdown(gdiplusToken); return E_OUTOFMEMORY; }
     const INT_PTR result = DialogBoxIndirectParamW(instance, dialog, owner, Dialog, reinterpret_cast<LPARAM>(&state));
 
     Gdiplus::GdiplusShutdown(gdiplusToken);
 
     if (result == IDOK && state.pattern.Valid()) {
         output = state.pattern;
+        state.pattern.Clear();
         return S_OK;
     }
+    state.pattern.Clear();
     if (result == IDCANCEL) return S_FALSE;
     return E_FAIL;
 }

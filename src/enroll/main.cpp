@@ -7,16 +7,17 @@
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
     const bool refresh = command && wcscmp(command, L"--refresh") == 0;
-    if (command && *command && !refresh) {
-        MessageBoxW(nullptr, L"Use no arguments to enroll, or --refresh to verify your password again.", L"Patlock", MB_OK | MB_ICONERROR); return 1;
+    const bool remove = command && wcscmp(command, L"--remove") == 0;
+    if (command && *command && !refresh && !remove) {
+        MessageBoxW(nullptr, L"Use no arguments to enroll, --refresh to verify your password again, or --remove to remove enrollment.", L"Patlock", MB_OK | MB_ICONERROR); return 1;
     }
-    if (MessageBoxW(nullptr, L"VM testing only. Baseline mode stores a recoverable Windows password.\n"
-        L"BitLocker/device encryption is a prerequisite; administrators can recover the stored password.\n"
-        L"Use only a throwaway local VM account. Continue?", L"Patlock baseline enrollment", MB_YESNO | MB_ICONWARNING) != IDYES) return 0;
+    if (MessageBoxW(nullptr, L"VM testing only. Patlock stores a recoverable Windows password.\n"
+        L"BitLocker/device encryption is required. Baseline storage is used only when no TPM is present.\n"
+        L"Use only a throwaway local VM account. Continue?", L"Set up Patlock", MB_YESNO | MB_ICONWARNING) != IDYES) return 0;
     wchar_t user[256]{};
     patlock::Password password;
     CREDUI_INFOW ui{}; ui.cbSize = sizeof(ui);
-    ui.pszCaptionText = refresh ? L"Patlock: verify password again" : L"Patlock: enroll local account";
+    ui.pszCaptionText = remove ? L"Patlock: remove enrollment" : refresh ? L"Patlock: verify password again" : L"Patlock: enroll local account";
     ui.pszMessageText = L"Enter an unqualified local username and its full Windows password. No domain or Microsoft accounts.";
     BOOL save = FALSE;
     const DWORD prompt = CredUIPromptForCredentialsW(&ui, L"Patlock local account", nullptr, 0,
@@ -28,7 +29,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
     wchar_t sid[184]{};
     if (SUCCEEDED(hr)) hr = patlock::ValidatePassword(cleanUser, password.data(), sid);
     if (SUCCEEDED(hr) && refresh) hr = patlock::Refresh(cleanUser, sid, password.data());
-    if (SUCCEEDED(hr) && !refresh) {
+    if (SUCCEEDED(hr) && remove) {
+        if (MessageBoxW(nullptr, L"Remove this account's Pattern enrollment and active TPM key?\nWindows Password sign-in remains available.", L"Remove Patlock enrollment", MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
+        hr = patlock::RemoveEnrollment(cleanUser, sid, password.data());
+    }
+    if (SUCCEEDED(hr) && !refresh && !remove) {
         patlock::Pattern first, second;
         hr = patlock::DrawPattern(instance, nullptr, false, first);
         if (hr != S_OK) return FAILED(hr) ? 1 : 0;
@@ -39,12 +44,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         if (SUCCEEDED(hr)) hr = patlock::Enroll(cleanUser, sid, password.data(), first);
     }
     password.Clear();
+    if (SUCCEEDED(hr) && remove) {
+        MessageBoxW(nullptr, L"Pattern enrollment removed. Windows Password sign-in is available.", L"Patlock", MB_OK | MB_ICONINFORMATION); return 0;
+    }
     if (SUCCEEDED(hr)) {
         const bool isTpm = (patlock::QueryTpmMode(sid) == S_OK);
         const wchar_t* modeMsg = isTpm
             ? L"Enrolled with a TPM-backed key (experimental; protection requires validation).\nPattern unlock is active and persists across reboots."
             : L"Enrolled successfully in baseline mode (software store).\nPattern unlock is active and persists across reboots.";
         MessageBoxW(nullptr, modeMsg, L"Patlock", MB_OK | MB_ICONINFORMATION);
+        if (hr == S_FALSE) MessageBoxW(nullptr, L"The new enrollment was saved, but an old TPM key could not be retired.\nThe active credential is usable; see the recovery notes for cleanup.", L"Patlock cleanup", MB_OK | MB_ICONWARNING);
     } else {
         wchar_t errorMsg[512];
         if (hr == HRESULT_FROM_WIN32(ERROR_LOGON_FAILURE)) {

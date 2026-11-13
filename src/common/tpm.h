@@ -3,23 +3,23 @@
 
 namespace patlock {
 namespace tpm {
-
-// Check whether the Microsoft Platform Crypto Provider (TPM KSP) is available.
+// S_OK: TPM reported and Platform KSP opened (not a key-operation guarantee).
+// S_FALSE: TBS explicitly reports no compatible TPM. Failure: operational error.
+// Only S_FALSE permits enrollment to select baseline protection.
+HRESULT Probe() noexcept;
+// Compatibility helper; do not use to decide whether fallback is permissible.
 bool Available() noexcept;
 
-// Creates an RSA 2048 key in the TPM for this SID, with separately derived authValue
-// as its usage authorization. Encrypts plainKey (32 bytes) with OAEP SHA-256.
-// Returns the 256-byte wrappedKey.
-HRESULT ProtectKey(PCWSTR sid, const BYTE authValue[32], const BYTE plainKey[32],
+// identity is a unique per-enrollment SID/generation name supplied by the store.
+// Uses a wiped hex UTF-16 encoding of separately derived 32-byte authorization
+// with the Platform KSP PIN property. Hardware anti-hammering is not yet verified.
+// Creates RSA-2048 machine key, restricts ACL, disables private export, wraps the
+// AES key using OAEP-SHA256, and checks correct-auth reopen/decrypt roundtrip.
+// On failure clears output and attempts deletion of the newly created key.
+HRESULT ProtectKey(PCWSTR identity, const BYTE authValue[32], const BYTE plainKey[32],
                    BYTE wrappedKey[256]) noexcept;
-
-// Opens the RSA 2048 key in the TPM for this SID, supplies authValue,
-// and decrypts wrappedKey (256 bytes) with OAEP SHA-256 to recover plainKey (32 bytes).
-HRESULT UnprotectKey(PCWSTR sid, const BYTE authValue[32], const BYTE wrappedKey[256],
+HRESULT UnprotectKey(PCWSTR identity, const BYTE authValue[32], const BYTE wrappedKey[256],
                      BYTE plainKey[32]) noexcept;
-
-// Deletes the persisted TPM key for this SID.
-HRESULT DeleteKey(PCWSTR sid) noexcept;
-
+HRESULT DeleteKey(PCWSTR identity) noexcept;
 } // namespace tpm
 } // namespace patlock

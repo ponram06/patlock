@@ -26,3 +26,4 @@ logs/
 build/
 .superpowers/
 .pattern_unlock.json
+dist/

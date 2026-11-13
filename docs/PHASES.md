@@ -18,7 +18,7 @@ Tasks:
 - Tile has a button that opens the pattern window (via the provider events interface's window-creation callback).
 - Draw a 3x3 grid; track press, drag, release; add dots with the skipped-dot rule; show the trail.
 - Build the pattern window so it can ALSO run as a standalone desktop test app (`src/tools/pattern_window_demo`) with no provider install. This is needed for Phase 7.
-- Log the resulting dot sequence to a debug log ONLY in a debug build (never in release).
+- Never log dot sequences, including debug builds (AGENTS.md secret-logging rule).
 Done when: on both the lock screen and the sign-in screen in the VM, dragging with the trackpad produces the right dot sequence.
 If this fails, stop and report; see fallback in `PLAN.md` section 11.
 
@@ -44,7 +44,9 @@ Done when: in the VM, Win+L then pattern unlocks; after restart (and full passwo
 ## Phase 5: Hardening
 Tasks:
 - Escalating lockout (30 s, 1, 5, 15 min); disable Pattern after about 10 failures until explicit Patlock password verification.
-- Full password required after restart and after 24 h.
+- Current approved Option A in PLAN.md permits Pattern across reboots; password
+  age expiration defaults off. Password refresh resets lockout; re-enrollment
+  recovers stale or interrupted stored-password submissions.
 - TPM-backed key with pattern-derived authorization where available; fallback to baseline otherwise.
 - Fail-closed error handling everywhere in the provider; verify no secrets in logs; hide-trail option.
 Done when: all items in `docs/TESTING.md` sections "Lockout", "Full-password rule", "Failure handling", "Security checks" pass.

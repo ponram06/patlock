@@ -23,9 +23,22 @@ foreach ($item in $requiredFiles) {
     }
 }
 
-$destPath = Join-Path $repoRoot $OutputDir
+$distRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot 'dist'))
+$destPath = [IO.Path]::GetFullPath((Join-Path $repoRoot $OutputDir))
+if (-not $destPath.StartsWith($distRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'OutputDir must be a child folder under this repository''s dist directory.'
+}
+# Refuse links/junctions in every existing ancestor of the destination.
+$ancestor = [IO.DirectoryInfo]::new($destPath)
+while ($null -ne $ancestor) {
+    if ($ancestor.Exists -and ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'Package output cannot traverse a junction or symbolic link.'
+    }
+    if ($ancestor.FullName -eq $repoRoot) { break }
+    $ancestor = $ancestor.Parent
+}
 if (Test-Path -LiteralPath $destPath) {
-    Remove-Item -LiteralPath $destPath -Recurse -Force
+    throw 'Package destination already exists. Choose a fresh child folder under dist; existing files are never recursively deleted.'
 }
 New-Item -ItemType Directory -Path $destPath -Force | Out-Null
 
@@ -47,6 +60,15 @@ Copy-Item -LiteralPath "$PSScriptRoot\unregister.reg" -Destination $installDir -
 # Copy recovery documentation
 Copy-Item -LiteralPath "$repoRoot\docs\RECOVERY.md" -Destination $destPath -Force
 Copy-Item -LiteralPath "$repoRoot\README.md" -Destination $destPath -Force
+Copy-Item -LiteralPath "$repoRoot\docs\RELEASE_STATUS.md" -Destination $destPath -Force
+Copy-Item -LiteralPath "$repoRoot\docs\TPM_VALIDATION.md" -Destination $destPath -Force
+Copy-Item -LiteralPath "$repoRoot\docs\VM_ACCEPTANCE.md" -Destination $destPath -Force
+# Public artifact hashes only; credential records and private keys are excluded.
+$hashes = foreach ($item in $requiredFiles) {
+    $hash = Get-FileHash -LiteralPath (Join-Path $destPath $item.Name) -Algorithm SHA256
+    '{0}  {1}' -f $hash.Hash, $item.Name
+}
+$hashes | Set-Content -LiteralPath (Join-Path $destPath 'SHA256SUMS.txt') -Encoding ascii
 
 # Create ZIP archive
 $zipPath = Join-Path $repoRoot "dist\Patlock-$Configuration.zip"
