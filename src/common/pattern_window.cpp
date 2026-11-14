@@ -906,7 +906,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             const Layout grid{WindowW / 2 - GridSpacing, GridTopY, GridSpacing, HitRadius};
 
             // ── Anti-Aliased Connecting Lines with Rounded Caps ──────────────
-            Gdiplus::Pen linePen(lineColor, 4.0f);
+            Gdiplus::Pen linePen(lineColor, 3.0f);
             linePen.SetStartCap(Gdiplus::LineCapRound);
             linePen.SetEndCap(Gdiplus::LineCapRound);
             linePen.SetLineJoin(Gdiplus::LineJoinRound);
@@ -931,29 +931,29 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
                 if (visited) {
                     // Connected dot: outer ring + inner core
-                    float rOut = 14.0f;
+                    float rOut = 11.0f;
                     Gdiplus::SolidBrush db(discBg);
                     g.FillEllipse(&db, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
-                    Gdiplus::Pen rp(ringColor, 2.5f);
+                    Gdiplus::Pen rp(ringColor, 2.0f);
                     g.DrawEllipse(&rp, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
 
-                    float rIn = 5.5f;
+                    float rIn = 4.5f;
                     Gdiplus::SolidBrush cb(coreColor);
                     g.FillEllipse(&cb, p.x - rIn, p.y - rIn, 2.0f * rIn, 2.0f * rIn);
                 } else if (hovered) {
                     // Hovered dot: cyan accent ring
-                    float rOut = 13.5f;
+                    float rOut = 11.0f;
                     Gdiplus::SolidBrush db(Palette(*state, Gdiplus::Color(255, 18, 48, 88), COLOR_WINDOW));
                     g.FillEllipse(&db, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
-                    Gdiplus::Pen hp(Palette(*state, Gdiplus::Color(255, 0, 160, 255), COLOR_HIGHLIGHT), 2.0f);
+                    Gdiplus::Pen hp(Palette(*state, Gdiplus::Color(255, 0, 160, 255), COLOR_HIGHLIGHT), 1.75f);
                     g.DrawEllipse(&hp, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
 
-                    float rIn = 4.5f;
+                    float rIn = 4.0f;
                     Gdiplus::SolidBrush cb(Palette(*state, Gdiplus::Color(255, 210, 235, 255), COLOR_WINDOWTEXT));
                     g.FillEllipse(&cb, p.x - rIn, p.y - rIn, 2.0f * rIn, 2.0f * rIn);
                 } else {
                     // Quiet solid dots, with a fine light edge for dark wallpapers.
-                    float r = 14.0f;
+                    float r = 11.0f;
                     Gdiplus::SolidBrush dotBrush(Palette(*state, Gdiplus::Color(255, 10, 14, 20), COLOR_WINDOW));
                     g.FillEllipse(&dotBrush, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
 
