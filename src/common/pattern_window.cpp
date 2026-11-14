@@ -751,9 +751,11 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
     case WM_LBUTTONUP: {
         if (state->visual != VisualState::Drawing) return TRUE;
-        if (state->dragging && !state->hoverStroke && GetCapture() == window) {
+        if (state->dragging && GetCapture() == window) {
             Track(window, *state, {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
-            FinishPattern(window, *state);
+            if (!state->hoverStroke || state->pattern.Valid()) {
+                FinishPattern(window, *state);
+            }
         }
         return TRUE;
     }

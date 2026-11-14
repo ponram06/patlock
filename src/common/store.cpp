@@ -285,30 +285,12 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
             return validationHr;
         }
 
-        // TPM validated - create unique key with GUID to prevent replacement collision
-        GUID generationGuid{};
-        hr = CoCreateGuid(&generationGuid);
-        if (FAILED(hr)) return hr;
-
-        wchar_t guidStr[40]{};
-        StringCchPrintfW(guidStr, ARRAYSIZE(guidStr), L"%08x%04x%04x%02x%02x%02x%02x%02x%02x%02x%02x",
-            generationGuid.Data1, generationGuid.Data2, generationGuid.Data3,
-            generationGuid.Data4[0], generationGuid.Data4[1], generationGuid.Data4[2],
-            generationGuid.Data4[3], generationGuid.Data4[4], generationGuid.Data4[5],
-            generationGuid.Data4[6], generationGuid.Data4[7]);
-
         Secret<BYTE, 32> authorization;
         HRESULT tpmHr = DeriveTpmAuthorization(pattern, bundle.record.salt, authorization.data());
-        wchar_t baseIdentity[240]{};
-        if (SUCCEEDED(tpmHr)) tpmHr = KeyIdentity(bundle.record, baseIdentity);
-
-        // Append GUID to make this generation's key unique
         wchar_t identity[240]{};
-        if (SUCCEEDED(tpmHr)) {
-            tpmHr = StringCchPrintfW(identity, ARRAYSIZE(identity), L"%s_%s", baseIdentity, guidStr);
-        }
-
+        if (SUCCEEDED(tpmHr)) tpmHr = KeyIdentity(bundle.record, identity);
         if (SUCCEEDED(tpmHr)) tpmHr = tpm::ProtectKey(identity, authorization.data(), aesKey.data(), bundle.record.tpmWrappedKey);
+
 
         if (SUCCEEDED(tpmHr)) {
             bundle.record.tpmMode = 1;
