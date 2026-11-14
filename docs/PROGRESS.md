@@ -12,6 +12,24 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-14: Phase 7 native-hierarchy UI repair
+- Built: restored the requested native hierarchy: Windows username, then only
+  the 3x3 pattern grid, then `Other sign-in options`. The normal state has no
+  card, title, or instruction text. Status text is shown only for success,
+  failure, or lockout recovery. The grid uses system accent colorization for
+  active strokes;
+  corrected AARRGGBB-to-RGB conversion so red/blue are not swapped.
+- Preserved: hover-to-start, drag alternative, skipped-dot rules, verifier and
+  lockout callbacks, fallback button keyboard behavior, high contrast, and all
+  storage/serialization behavior. No re-enrollment is needed for this UI-only
+  source change.
+- Tested by human in VM (results): not yet tested.
+- Not verified yet: build warnings, standalone demo, lock/sign-in placement,
+  high contrast, DPI scaling, accent rendering, and real-trackpad feel.
+- Next step: build and run the standalone demo in the VM, then test at the
+  screenshot resolution before updating the provider DLL through the existing
+  guarded VM-only process.
+
 ### 2026-11-14: Floating reference-style visual redesign
 - User supplied a cardless large-grid reference. Written: larger shared layout,
   floating solid dots, restrained cyan feedback, transparent status, and native

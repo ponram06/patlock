@@ -14,8 +14,52 @@
 namespace patlock {
 namespace {
 
-// ── Color Key for Outer Transparent Margins ──────────────────────────────────
+// ── Timer IDs (named constants to prevent collision) ─────────────────────────
+enum TimerId : UINT_PTR {
+    kTimerInactivity = 1,    // 2-minute session timeout
+    kTimerFinish     = 2,    // hover-stroke finish deadline
+    kTimerShort      = 3,    // short-stroke minimum wait
+    kTimerSuccess    = 4,    // close after success flash (120ms)
+    kTimerTooShort   = 5,    // clear 'too short' message (1000ms)
+    kTimerRetry      = 6,    // wrong-pattern / lockout clear
+    kTimerStart      = 7,    // hover-to-start arm delay
+    kTimerPoll       = 8     // cursor position poll (30ms)
+};
+
+// ── Timing Constants ─────────────────────────────────────────────────────────
+constexpr UINT kSuccessFlashMs = 120;
+constexpr UINT kWrongFlashMs = 800;
+constexpr UINT kTooShortFlashMs = 1000;
+constexpr UINT kInactivityTimeoutMs = 120000;
+constexpr UINT kCursorPollMs = 30;
+
+// ── Color Key for Transparent Window (non-high-contrast mode) ────────────────
 constexpr COLORREF TransparentKey = RGB(1, 1, 1);
+
+/// Returns the Windows system accent color for Windows 11 Fluent Design.
+/// Falls back to Windows 11 default blue if retrieval fails.
+Gdiplus::Color GetSystemAccentColor() noexcept {
+    DWORD color = 0;
+    BOOL opaque = FALSE;
+    // DwmGetColorizationColor requires dwmapi.dll
+    HMODULE dwmapi = LoadLibraryW(L"dwmapi.dll");
+    if (dwmapi) {
+        typedef HRESULT (WINAPI *DwmGetColorizationColorFunc)(DWORD*, BOOL*);
+        auto func = reinterpret_cast<DwmGetColorizationColorFunc>(GetProcAddress(dwmapi, "DwmGetColorizationColor"));
+        if (func && SUCCEEDED(func(&color, &opaque))) {
+            FreeLibrary(dwmapi);
+            // DwmGetColorizationColor returns AARRGGBB, unlike COLORREF's BGR
+            // byte order. Do not use GetRValue/GetGValue/GetBValue here.
+            return Gdiplus::Color(255,
+                static_cast<BYTE>((color >> 16) & 0xff),
+                static_cast<BYTE>((color >> 8) & 0xff),
+                static_cast<BYTE>(color & 0xff));
+        }
+        FreeLibrary(dwmapi);
+    }
+    // Fallback: Windows 11 default blue
+    return Gdiplus::Color(255, 0, 120, 212);
+}
 
 // Layout constants
 constexpr int WindowW     = PatternLayout::Width;
@@ -102,10 +146,10 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
     state.background = brush;
     auto scaled = [&state](int value) { return static_cast<int>(value * state.scale); };
     if (!SetWindowPos(window, HWND_TOP, x, y, w, h, SWP_NOACTIVATE) ||
-        !MoveWindow(state.status, scaled(12), scaled(2), scaled(WindowW - 24), scaled(30), TRUE) ||
-        !MoveWindow(state.fallback, scaled(40), scaled(PatternLayout::FallbackTop), scaled(WindowW - 80), scaled(PatternLayout::FallbackHeight), TRUE)) return false;
-    // High contrast uses an opaque system-colored surface; normal mode floats
-    // directly over the existing LogonUI background without sampling it.
+        !MoveWindow(state.status, scaled(20), scaled(PatternLayout::StatusTop), scaled(WindowW - 40), scaled(PatternLayout::StatusHeight), TRUE) ||
+        !MoveWindow(state.fallback, scaled(32), scaled(PatternLayout::FallbackTop), scaled(WindowW - 64), scaled(PatternLayout::FallbackHeight), TRUE)) return false;
+    // Only the margin is color-key transparent. An opaque panel keeps text
+    // readable and prevents LogonUI account text showing through the controls.
     if (!SetLayeredWindowAttributes(window, TransparentKey, state.highContrast ? 255 : 0,
         state.highContrast ? LWA_ALPHA : LWA_COLORKEY)) return false;
     InvalidateRect(window, nullptr, TRUE);
@@ -144,7 +188,9 @@ int DotAt(HWND window, POINT pt, int threshold) noexcept {
 }
 
 void UpdateStatus(HWND window, const State& state) noexcept {
-    wchar_t text[96] = L"Hover on a dot, then draw";
+    // LogonUI owns the account name. Keep Patlock's ready state visually quiet;
+    // show status only when recovery guidance is needed.
+    wchar_t text[96] = L"";
     if (state.visual == VisualState::Success) StringCchCopyW(text, ARRAYSIZE(text), L"Pattern accepted");
     else if (state.visual == VisualState::Checking) StringCchCopyW(text, ARRAYSIZE(text), L"Checking pattern...");
     else if (state.visual == VisualState::ErrorTooShort) StringCchPrintfW(text, ARRAYSIZE(text), L"Connect at least %zu dots", MinimumDots);
@@ -152,11 +198,6 @@ void UpdateStatus(HWND window, const State& state) noexcept {
     else if (state.visual == VisualState::ErrorLockout) {
         if (state.passwordRequired) StringCchCopyW(text, ARRAYSIZE(text), L"Pattern unavailable. Use Password.");
         else StringCchPrintfW(text, ARRAYSIZE(text), L"Try again in %lu seconds", state.retrySeconds);
-    } else if (state.pattern.count) {
-        StringCchPrintfW(text, ARRAYSIZE(text), state.hoverStroke
-            ? L"%zu dots connected; pause to submit" : L"%zu dots connected; release to submit", state.pattern.count);
-    } else if (!state.gate.Armed()) {
-        StringCchCopyW(text, ARRAYSIZE(text), L"Move away, then hover on a dot");
     }
     wchar_t old[96]{};
     GetWindowTextW(state.status, old, ARRAYSIZE(old));
@@ -164,6 +205,10 @@ void UpdateStatus(HWND window, const State& state) noexcept {
         SetWindowTextW(state.status, text);
         NotifyWinEvent(EVENT_OBJECT_NAMECHANGE, state.status, OBJID_CLIENT, 0);
     }
+    const bool show = state.visual == VisualState::Success || state.visual == VisualState::Checking ||
+        state.visual == VisualState::ErrorTooShort || state.visual == VisualState::ErrorWrong ||
+        state.visual == VisualState::ErrorLockout;
+    ShowWindow(state.status, show ? SW_SHOWNOACTIVATE : SW_HIDE);
     InvalidateRect(window, nullptr, FALSE);
 }
 
@@ -181,11 +226,11 @@ bool RefreshRetry(HWND window, State& state) noexcept {
 }
 
 void ResetStroke(HWND window, State& state) noexcept {
-    KillTimer(window, 2);
-    KillTimer(window, 3);
-    KillTimer(window, 5);
-    KillTimer(window, 6);
-    KillTimer(window, 7);
+    KillTimer(window, kTimerFinish);
+    KillTimer(window, kTimerShort);
+    KillTimer(window, kTimerTooShort);
+    KillTimer(window, kTimerRetry);
+    KillTimer(window, kTimerStart);
     state.pattern.Clear();
     state.dragging = false;
     state.hoverStroke = false;
@@ -228,9 +273,9 @@ void Track(HWND window, State& state, POINT to) noexcept {
 
 void FinishPattern(HWND window, State& state) noexcept {
     if (state.visual != VisualState::Drawing) return;
-    KillTimer(window, 2);
-    KillTimer(window, 3);
-    KillTimer(window, 7);
+    KillTimer(window, kTimerFinish);
+    KillTimer(window, kTimerShort);
+    KillTimer(window, kTimerStart);
     state.startDue = state.finishDue = state.shortDue = 0;
 
     if (!state.pattern.Valid()) {
@@ -240,7 +285,7 @@ void FinishPattern(HWND window, State& state) noexcept {
             state.visual = VisualState::ErrorTooShort;
             if (GetCapture() == window) ReleaseCapture();
             UpdateStatus(window, state);
-            if (!SetTimer(window, 5, 1000, nullptr)) EndDialog(window, -1);
+            if (!SetTimer(window, kTimerTooShort, kTooShortFlashMs, nullptr)) EndDialog(window, -1);
         } else {
             ResetStroke(window, state);
         }
@@ -262,18 +307,18 @@ void FinishPattern(HWND window, State& state) noexcept {
         if (result == VerifyResult::Success) {
             state.visual = VisualState::Success;
             UpdateStatus(window, state);
-            if (!SetTimer(window, 4, 120, nullptr)) { state.pattern.Clear(); EndDialog(window, -1); }
+            if (!SetTimer(window, kTimerSuccess, kSuccessFlashMs, nullptr)) { state.pattern.Clear(); EndDialog(window, -1); }
         } else if (result == VerifyResult::Lockout) {
             state.visual = VisualState::ErrorLockout;
             state.pattern.Clear();
             if (!RefreshRetry(window, state)) return;
             UpdateStatus(window, state);
-            if (!state.passwordRequired && !SetTimer(window, 6, 1000, nullptr)) EndDialog(window, -1);
+            if (!state.passwordRequired && !SetTimer(window, kTimerRetry, 1000, nullptr)) EndDialog(window, -1);
         } else {
             // Wrong pattern: flash red for 800ms, then reset stroke for instant retry
             state.visual = VisualState::ErrorWrong;
             UpdateStatus(window, state);
-            if (!SetTimer(window, 6, 800, nullptr)) { state.pattern.Clear(); EndDialog(window, -1); }
+            if (!SetTimer(window, kTimerRetry, kWrongFlashMs, nullptr)) { state.pattern.Clear(); EndDialog(window, -1); }
         }
     } else {
         state.visual = VisualState::Success;
@@ -308,7 +353,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         state->fallback = CreateWindowExW(0, L"BUTTON", L"&Other sign-in options",
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0,
             window, reinterpret_cast<HMENU>(IDCANCEL), nullptr, nullptr);
-        state->status = CreateWindowExW(0, L"STATIC", L"Hover on a dot, then draw",
+        state->status = CreateWindowExW(0, L"STATIC", L"",
             WS_CHILD | WS_VISIBLE | SS_CENTER, 0, 0, 0, 0,
             window, reinterpret_cast<HMENU>(1001), nullptr, nullptr);
         if (!state->fallback || !state->status || !Configure(window, *state, GetDpiForWindow(window), nullptr)) {
@@ -321,23 +366,23 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             if (state->passwordRequired || state->retrySeconds) {
                 state->visual = VisualState::ErrorLockout;
                 UpdateStatus(window, *state);
-                if (!state->passwordRequired && !SetTimer(window, 6, 1000, nullptr)) { EndDialog(window, -1); return FALSE; }
+                if (!state->passwordRequired && !SetTimer(window, kTimerRetry, 1000, nullptr)) { EndDialog(window, -1); return FALSE; }
             }
         }
 
-        if (!SetTimer(window, 1, 120000, nullptr)) EndDialog(window, -1);
-        if (!SetTimer(window, 8, 30, nullptr)) EndDialog(window, -1);
+        if (!SetTimer(window, kTimerInactivity, kInactivityTimeoutMs, nullptr)) EndDialog(window, -1);
+        if (!SetTimer(window, kTimerPoll, kCursorPollMs, nullptr)) EndDialog(window, -1);
         return FALSE; // Focus was explicitly assigned to the native fallback button.
     }
     if (!state) return FALSE;
 
     if (message == WM_LBUTTONDOWN || message == WM_MOUSEMOVE || message == WM_LBUTTONUP) {
-        if (!SetTimer(window, 1, 120000, nullptr)) { state->pattern.Clear(); EndDialog(window, -1); return TRUE; }
+        if (!SetTimer(window, kTimerInactivity, kInactivityTimeoutMs, nullptr)) { state->pattern.Clear(); EndDialog(window, -1); return TRUE; }
     }
 
     switch (message) {
     case WM_TIMER:
-        if (wp == 8) {
+        if (wp == kTimerPoll) {
             // Color-keyed transparent areas pass mouse messages through. Sample
             // actual cursor movement so generous hit targets still work there.
             // Stationary samples do not reset inactivity or hover deadlines.
@@ -355,14 +400,14 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             }
             return TRUE;
         }
-        if (wp == 7) {
+        if (wp == kTimerStart) {
             if (!state->startDue) return TRUE;
             const UINT remaining = HoverPolicy::Remaining(GetTickCount64(), state->startDue);
             if (remaining) {
-                if (!SetTimer(window, 7, remaining, nullptr)) EndDialog(window, -1);
+                if (!SetTimer(window, kTimerStart, remaining, nullptr)) EndDialog(window, -1);
                 return TRUE;
             }
-            KillTimer(window, 7);
+            KillTimer(window, kTimerStart);
             state->startDue = 0;
             POINT current{};
             if (!GetCursorPos(&current) || !ScreenToClient(window, &current)) { EndDialog(window, -1); return TRUE; }
@@ -379,13 +424,13 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 if (GetCapture() != window) { ResetStroke(window, *state); return TRUE; }
                 state->pattern.Add(static_cast<BYTE>(actualDot));
                 state->shortDue = GetTickCount64() + HoverPolicy::ShortStrokeDelayMs;
-                if (!SetTimer(window, 3, HoverPolicy::ShortStrokeDelayMs, nullptr)) { EndDialog(window, -1); return TRUE; }
+                if (!SetTimer(window, kTimerShort, HoverPolicy::ShortStrokeDelayMs, nullptr)) { EndDialog(window, -1); return TRUE; }
                 UpdateStatus(window, *state);
             } else state->pendingStartDot = -1;
             return TRUE;
         }
-        if (wp == 2 || wp == 3) {
-            ULONGLONG& deadline = wp == 2 ? state->finishDue : state->shortDue;
+        if (wp == kTimerFinish || wp == kTimerShort) {
+            ULONGLONG& deadline = wp == kTimerFinish ? state->finishDue : state->shortDue;
             if (!deadline) return TRUE;
             const UINT remaining = HoverPolicy::Remaining(GetTickCount64(), deadline);
             if (remaining) {
@@ -411,41 +456,41 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             if (dx * dx + dy * dy > tolerance * tolerance) {
                 Track(window, *state, current);
                 state->finishAnchor = current;
-                const UINT_PTR timer = state->pattern.Valid() ? 2 : 3;
+                const UINT_PTR timer = state->pattern.Valid() ? kTimerFinish : kTimerShort;
                 const UINT delay = state->pattern.Valid() ? HoverPolicy::FinishDelayMs : HoverPolicy::ShortStrokeDelayMs;
                 state->finishDue = state->shortDue = 0;
-                (timer == 2 ? state->finishDue : state->shortDue) = GetTickCount64() + delay;
+                (timer == kTimerFinish ? state->finishDue : state->shortDue) = GetTickCount64() + delay;
                 if (!SetTimer(window, timer, delay, nullptr)) EndDialog(window, -1);
                 return TRUE;
             }
-            if ((wp == 2 && HoverPolicy::CanFinish(state->hoverStroke, state->dragging, state->pattern.Valid(), true)) ||
-                (wp == 3 && !state->pattern.Valid())) FinishPattern(window, *state);
+            if ((wp == kTimerFinish && HoverPolicy::CanFinish(state->hoverStroke, state->dragging, state->pattern.Valid(), true)) ||
+                (wp == kTimerShort && !state->pattern.Valid())) FinishPattern(window, *state);
             return TRUE;
         }
-        if (wp == 1) {
+        if (wp == kTimerInactivity) {
             state->pattern.Clear();
             if (GetCapture() == window) ReleaseCapture();
             EndDialog(window, IDCANCEL);
             return TRUE;
         }
-        if (wp == 4) {
-            KillTimer(window, 4);
+        if (wp == kTimerSuccess) {
+            KillTimer(window, kTimerSuccess);
             EndDialog(window, IDOK);
             return TRUE;
         }
-        if (wp == 5) {
-            KillTimer(window, 5);
+        if (wp == kTimerTooShort) {
+            KillTimer(window, kTimerTooShort);
             if (state->visual == VisualState::ErrorTooShort) ResetStroke(window, *state);
             return TRUE;
         }
-        if (wp == 6) {
-            KillTimer(window, 6);
+        if (wp == kTimerRetry) {
+            KillTimer(window, kTimerRetry);
             if (state->visual == VisualState::ErrorLockout) {
                 if (!RefreshRetry(window, *state)) return TRUE;
                 if (!state->passwordRequired && state->retrySeconds == 0) ResetStroke(window, *state);
                 else {
                     UpdateStatus(window, *state);
-                    if (!state->passwordRequired && !SetTimer(window, 6, 1000, nullptr)) EndDialog(window, -1);
+                    if (!state->passwordRequired && !SetTimer(window, kTimerRetry, 1000, nullptr)) EndDialog(window, -1);
                 }
             } else if (state->visual == VisualState::ErrorWrong) ResetStroke(window, *state);
             return TRUE;
@@ -479,7 +524,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         const int dot = DotAt(window, current, grid.hitRadius);
         if (dot < 0) return TRUE;
 
-        KillTimer(window, 7);
+        KillTimer(window, kTimerStart);
         state->startDue = 0;
         state->pattern.Clear();
         state->visual = VisualState::Drawing;
@@ -517,11 +562,11 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 const double tolerance = 3 * state->scale;
                 if (state->pattern.count != oldCount || dx * dx + dy * dy > tolerance * tolerance) {
                     state->finishAnchor = current;
-                    KillTimer(window, 2); KillTimer(window, 3);
+                    KillTimer(window, kTimerFinish); KillTimer(window, kTimerShort);
                     state->finishDue = state->shortDue = 0;
-                    const UINT_PTR timer = state->pattern.Valid() ? 2 : 3;
+                    const UINT_PTR timer = state->pattern.Valid() ? kTimerFinish : kTimerShort;
                     const UINT delay = state->pattern.Valid() ? HoverPolicy::FinishDelayMs : HoverPolicy::ShortStrokeDelayMs;
-                    (timer == 2 ? state->finishDue : state->shortDue) = GetTickCount64() + delay;
+                    (timer == kTimerFinish ? state->finishDue : state->shortDue) = GetTickCount64() + delay;
                     if (!SetTimer(window, timer, delay, nullptr)) { state->pattern.Clear(); EndDialog(window, -1); return TRUE; }
                 }
             }
@@ -529,12 +574,12 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             if (state->pendingStartDot != state->hoverDot) {
                 state->pendingStartDot = state->hoverDot;
                 state->startDue = GetTickCount64() + HoverPolicy::StartDelayMs;
-                if (!SetTimer(window, 7, HoverPolicy::StartDelayMs, nullptr)) { EndDialog(window, -1); return TRUE; }
+                if (!SetTimer(window, kTimerStart, HoverPolicy::StartDelayMs, nullptr)) { EndDialog(window, -1); return TRUE; }
             }
         } else {
             state->pendingStartDot = -1;
             state->startDue = 0;
-            KillTimer(window, 7);
+            KillTimer(window, kTimerStart);
         }
         UpdateStatus(window, *state);
         return TRUE;
@@ -664,8 +709,8 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
 
-            // Normal mode is a floating grid over the real LogonUI background.
-            // High contrast retains a solid system-colored reading surface.
+            // Normal mode leaves the native account header and wallpaper visible.
+            // Patlock renders only the grid and fallback action.
             if (state->highContrast) {
                 Gdiplus::GraphicsPath cardPath;
                 AddRoundedRect(cardPath, Gdiplus::RectF(6.0f, 6.0f, rect.right - 12.0f, rect.bottom - 12.0f), 20.0f);
@@ -676,8 +721,9 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             }
 
             // ── Colors by state ──────────────────────────────────────────────
-            Gdiplus::Color lineColor(255, 0, 170, 255);
-            Gdiplus::Color ringColor(255, 0, 170, 255);
+            const Gdiplus::Color accent = GetSystemAccentColor();
+            Gdiplus::Color lineColor = accent;
+            Gdiplus::Color ringColor = accent;
             Gdiplus::Color discBg(255, 12, 48, 96);
             Gdiplus::Color coreColor(255, 255, 255, 255);
 

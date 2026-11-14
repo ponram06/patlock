@@ -1,23 +1,25 @@
-# Floating sign-in UI: reference-led redesign
+# Pattern sign-in UI: native lock-screen hierarchy
 
-The user's second reference image guides this UI: no boxed dark card in normal
-mode, larger grid below the native account header, solid dark dots and a quiet
-white text fallback. The Windows avatar/account header is not recreated or moved.
+The normal lock screen must show Windows' own account header, then the Patlock
+grid, then the fallback action. Patlock does not recreate the username, display
+a title, or show an instruction line while ready for input.
 
 ## Written behavior
 
-- 360 x 342 logical-unit layout, 90-unit dot spacing and 28-unit hit radius.
-  Layout/hit-testing use shared constants in pattern_layout.h. Bounds continue
-  to scale/clamp to the owner's monitor work area.
-- Solid near-black idle dots with a fine lighter edge, cyan hover/selected rings
-  and rounded 4-unit connecting lines. Error/accepted colors retain text status.
-- Normal background is color-key transparent, without wallpaper capture or an
-  undocumented acrylic API. High contrast has an opaque system-colored surface.
+- 360 x 342 logical-unit layout, 90-unit dot spacing and a 34-unit hit radius.
+  The native username sits above the grid; the fallback action sits below it.
+  Layout/hit-testing use shared constants in `pattern_layout.h`.
+- Normal mode is color-key transparent with no card, title, or ready-state text.
+  High contrast deliberately uses a system-colored surface.
+- Idle dots remain dark with a fine edge. Hovered and selected dots, plus the
+  connection trail, use the current Windows colorization accent when available.
+  Error and success retain distinct feedback colors.
 - The fallback is still a native BUTTON with its name/mnemonic/keyboard behavior,
   owner-drawn as text on a quiet rounded dark action surface. That surface keeps
   whitespace and padding clickable, unlike fully transparent text. Its focus
   indicator is rendered when Windows requests it; no default white button face.
-- Status remains a native accessible STATIC with a transparent normal background.
+- Status remains a native accessible STATIC. It is hidden in the ready state and
+  shown only for success, failure, or lockout recovery.
 - Hover start, pause completion, drag alternative, lockout countdown, Escape and
   capture/deactivation cancellation retain the existing authentication behavior.
 - Because color-keyed pixels pass mouse messages through, a 30 ms UI timer samples
@@ -32,9 +34,9 @@ No record format change; this UI update alone does not require re-enrollment.
 ## VM checks
 
 1. Build/run RUN_VM_TEST.cmd in the VM; open the new standalone demo first.
-2. Verify there is no card/white button in normal mode; inspect dots, text and
-   transparent gaps on both bright and dark backgrounds. Native LogonUI content
-   must not bleed through the grid; report a screenshot if it does.
+2. Verify the normal screen contains only the native username above the grid and
+   `Other sign-in options` below it. No ready-state text or card should appear.
+   Report a screenshot if account text overlaps a dot or an error message.
 3. Start by hovering in a generous target area, then draw through transparent
    gaps without clicking. Movement must not be mistaken for completion; only a
    stable valid stroke finishes after its configured pause.

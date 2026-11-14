@@ -1,8 +1,9 @@
 # Pattern-window implementation and VM acceptance
 
-Current visual direction: see FLOATING_UI.md. Normal mode now uses a larger
-cardless floating grid and owner-drawn native text fallback; the original boxed
-surface description below is historical. High contrast retains an opaque surface.
+Current visual direction: see FLOATING_UI.md. Normal mode leaves the Windows
+account header untouched, then shows only the grid and the native fallback action.
+Ready-state status text is intentionally hidden; recovery text is shown only for
+an error or lockout. High contrast uses a system-colored opaque surface.
 
 ## Current input update (2026-11-14)
 
@@ -21,8 +22,8 @@ real-trackpad validation was performed. This is not a claim of release readiness
 
 ## Behavior
 
-The existing rounded card and nine-dot style remain. A stroke starts only when the
-left button is pressed on a dot, follows pointer movement while that button is held,
+The rounded panel and nine-dot style remain. A stroke starts only when the left
+button is pressed on a dot, follows pointer movement while that button is held,
 and submits only on release. Hover and pause timers never begin or finish a stroke.
 The skipped-dot rule and configurable minimum in `pattern.h` still apply. Capture
 loss, cancel mode, deactivation during drawing, or DPI/layout changes discard an

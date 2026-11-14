@@ -3,12 +3,24 @@
 
 namespace patlock {
 namespace tpm {
-// S_OK: TPM reported and Platform KSP opened (not a key-operation guarantee).
-// S_FALSE: TBS explicitly reports no compatible TPM. Failure: operational error.
-// Only S_FALSE permits enrollment to select baseline protection.
+/// Distinguishes TPM hardware availability from operational failures.
+/// @return S_OK: TPM hardware present and PCP provider accessible (may still fail operations).
+///         S_FALSE: TPM hardware definitively absent (permits baseline fallback).
+///         E_FAIL or NTE_*: Provider present but TPM unavailable/locked (abort enrollment).
 HRESULT Probe() noexcept;
-// Compatibility helper; do not use to decide whether fallback is permissible.
+
+/// Returns true if TPM hardware is available for key operations.
+/// Compatibility helper; do not use to decide whether fallback is permissible.
+/// Use Probe() for enrollment decisions.
 bool Available() noexcept;
+
+/// Validates that TPM authorization enforcement is functional.
+/// Creates a temporary test key, wraps plaintext with authA, attempts decrypt with
+/// wrong authB (must fail), then decrypt with correct authA (must succeed).
+/// @return S_OK if authorization enforcement works correctly.
+///         E_ACCESSDENIED or E_FAIL if TPM does not enforce authorization.
+///         Other HRESULT on operational errors.
+HRESULT ValidateAuthorization() noexcept;
 
 // identity is a unique per-enrollment SID/generation name supplied by the store.
 // Uses a wiped hex UTF-16 encoding of separately derived 32-byte authorization

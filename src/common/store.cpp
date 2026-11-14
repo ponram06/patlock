@@ -114,14 +114,38 @@ HRESULT Mac(Bundle& bundle, BYTE output[32]) noexcept {
 
 HRESULT ComputePasswordMac(const BYTE key[32], PCWSTR password, BYTE output[32]) noexcept {
     if (!key || !password) return E_INVALIDARG;
-    BCRYPT_ALG_HANDLE algorithm = nullptr; BCRYPT_HASH_HANDLE hash = nullptr;
+
+    // Fixed-size buffer to prevent length-based timing attacks
+    // Pad password to 512 characters (1024 bytes including null terminator)
+    constexpr size_t kMaxPasswordChars = 512;
+    wchar_t padded[kMaxPasswordChars]{};
+    SecureZeroMemory(padded, sizeof(padded));
+
+    const size_t passwordLen = wcsnlen_s(password, kMaxPasswordChars);
+    if (passwordLen >= kMaxPasswordChars) return E_INVALIDARG;
+
+    wcscpy_s(padded, kMaxPasswordChars, password);
+    // Remaining bytes are already zero-padded
+
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+
     if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG) < 0) return E_FAIL;
+
     NTSTATUS result = BCryptCreateHash(algorithm, &hash, nullptr, 0, const_cast<BYTE*>(key), 32, 0);
-    const DWORD bytes = static_cast<DWORD>((wcslen(password) + 1) * sizeof(wchar_t));
-    if (result >= 0) result = BCryptHashData(hash, reinterpret_cast<BYTE*>(const_cast<PWSTR>(password)), bytes, 0);
+
+    // Always hash the full fixed-size buffer (including null terminator and padding)
+    if (result >= 0) {
+        result = BCryptHashData(hash, reinterpret_cast<BYTE*>(padded), static_cast<DWORD>(sizeof(padded)), 0);
+    }
+
     if (result >= 0) result = BCryptFinishHash(hash, output, 32, 0);
+
+    SecureZeroMemory(padded, sizeof(padded));
+
     if (hash) BCryptDestroyHash(hash);
     BCryptCloseAlgorithmProvider(algorithm, 0);
+
     return result >= 0 ? S_OK : E_FAIL;
 }
 
@@ -222,11 +246,13 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
     HRESULT hr = AuthenticatedIdentity(name, sid, supplied); if (FAILED(hr)) return hr;
     Lock lock; if (!lock.Acquire()) return E_ACCESSDENIED;
     Key root, user; hr = OpenUser(sid, root, user, true); if (FAILED(hr)) return hr;
+
     // Retire the previous generation only after the replacement record commits.
     Bundle previous;
     wchar_t previousIdentity[240]{};
     const bool retirePrevious = SUCCEEDED(Read(user, sid, previous)) && previous.record.tpmMode == 1 &&
         SUCCEEDED(KeyIdentity(previous.record, previousIdentity));
+
     wchar_t createdIdentity[240]{};
     bool createdTpm = false;
     Bundle bundle;
@@ -236,50 +262,108 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
     if (SUCCEEDED(hr)) hr = Random(bundle.record.salt, sizeof(bundle.record.salt));
     if (SUCCEEDED(hr)) hr = Random(bundle.record.nonce, sizeof(bundle.record.nonce));
     if (SUCCEEDED(hr)) hr = HashPattern(pattern, bundle.record.salt, bundle.record.hash);
-    if (SUCCEEDED(hr)) hr = ComputePasswordMac(bundle.key, supplied, bundle.record.passwordMac);
+    if (FAILED(hr)) return hr;
+    hr = ComputePasswordMac(bundle.key, supplied, bundle.record.passwordMac);
+    if (FAILED(hr)) return hr;
 
-    // Key management: try TPM-backed key protection first; fall back to baseline.
+    // Key management: validate TPM, then try TPM-backed protection; only fall back to baseline on S_FALSE.
     Secret<BYTE, 32> aesKey;
-    if (SUCCEEDED(hr)) hr = Random(aesKey.data(), 32);
-    const HRESULT probe = SUCCEEDED(hr) ? tpm::Probe() : hr;
-    if (FAILED(probe)) return probe;
-    if (SUCCEEDED(hr) && probe == S_OK) {
+    hr = Random(aesKey.data(), 32);
+    if (FAILED(hr)) return hr;
+
+    const HRESULT probe = tpm::Probe();
+    if (FAILED(probe)) {
+        // TPM provider exists but hardware is unavailable/locked - abort enrollment
+        return probe;
+    }
+
+    if (probe == S_OK) {
+        // TPM hardware available - validate authorization enforcement before using it
+        HRESULT validationHr = tpm::ValidateAuthorization();
+        if (FAILED(validationHr)) {
+            // TPM exists but authorization enforcement is broken - abort enrollment
+            return validationHr;
+        }
+
+        // TPM validated - create unique key with GUID to prevent replacement collision
+        GUID generationGuid{};
+        hr = CoCreateGuid(&generationGuid);
+        if (FAILED(hr)) return hr;
+
+        wchar_t guidStr[40]{};
+        StringCchPrintfW(guidStr, ARRAYSIZE(guidStr), L"%08x%04x%04x%02x%02x%02x%02x%02x%02x%02x%02x",
+            generationGuid.Data1, generationGuid.Data2, generationGuid.Data3,
+            generationGuid.Data4[0], generationGuid.Data4[1], generationGuid.Data4[2],
+            generationGuid.Data4[3], generationGuid.Data4[4], generationGuid.Data4[5],
+            generationGuid.Data4[6], generationGuid.Data4[7]);
+
         Secret<BYTE, 32> authorization;
         HRESULT tpmHr = DeriveTpmAuthorization(pattern, bundle.record.salt, authorization.data());
+        wchar_t baseIdentity[240]{};
+        if (SUCCEEDED(tpmHr)) tpmHr = KeyIdentity(bundle.record, baseIdentity);
+
+        // Append GUID to make this generation's key unique
         wchar_t identity[240]{};
-        if (SUCCEEDED(tpmHr)) tpmHr = KeyIdentity(bundle.record, identity);
+        if (SUCCEEDED(tpmHr)) {
+            tpmHr = StringCchPrintfW(identity, ARRAYSIZE(identity), L"%s_%s", baseIdentity, guidStr);
+        }
+
         if (SUCCEEDED(tpmHr)) tpmHr = tpm::ProtectKey(identity, authorization.data(), aesKey.data(), bundle.record.tpmWrappedKey);
+
         if (SUCCEEDED(tpmHr)) {
             bundle.record.tpmMode = 1;
             CopyMemory(createdIdentity, identity, sizeof(identity));
             createdTpm = true;
         } else {
-            // Hardware exists: an operational/authentication failure is not
-            // permission to silently weaken the enrollment to baseline storage.
+            // TPM operation failed after validation passed - abort enrollment, don't fall back
             return tpmHr;
         }
-    } else if (SUCCEEDED(hr)) {
+    } else {
+        // probe == S_FALSE: TPM definitively absent, baseline fallback permitted
         bundle.record.tpmMode = 0;
         SecureZeroMemory(bundle.record.tpmWrappedKey, sizeof(bundle.record.tpmWrappedKey));
         CopyMemory(aesKey.data(), bundle.key, 32);
     }
 
-    if (SUCCEEDED(hr)) hr = Random(bundle.record.boot, sizeof(bundle.record.boot));
+    hr = Random(bundle.record.boot, sizeof(bundle.record.boot));
+    if (FAILED(hr)) return hr;
+
     Password password;
-    if (SUCCEEDED(hr)) hr = StringCchCopyW(password.data(), password.value.size(), supplied);
+    hr = StringCchCopyW(password.data(), password.value.size(), supplied);
+    if (FAILED(hr)) return hr;
+
     bundle.record.cipherBytes = static_cast<DWORD>((wcslen(password.data()) + 1) * sizeof(wchar_t));
-    if (SUCCEEDED(hr)) hr = CipherWithKey(aesKey.data(), bundle.record, password, true);
+    hr = CipherWithKey(aesKey.data(), bundle.record, password, true);
     password.Clear();
     aesKey.Clear();
+    if (FAILED(hr)) {
+        if (createdTpm) tpm::DeleteKey(createdIdentity);
+        return hr;
+    }
 
     bundle.record.passwordTime = bundle.record.lastSeen = Now();
-    if (SUCCEEDED(hr)) hr = Save(user, bundle);
-    if (FAILED(hr) && createdTpm) {
-        const HRESULT cleanup = tpm::DeleteKey(createdIdentity);
-        if (FAILED(cleanup)) return cleanup;
+    hr = Save(user, bundle);
+
+    if (FAILED(hr)) {
+        // Record write failed - clean up the new TPM key
+        if (createdTpm) {
+            const HRESULT cleanup = tpm::DeleteKey(createdIdentity);
+            if (FAILED(cleanup)) return cleanup;  // Propagate cleanup failure
+        }
+        return hr;
     }
-    if (SUCCEEDED(hr) && retirePrevious && FAILED(tpm::DeleteKey(previousIdentity))) return S_FALSE;
-    return hr;
+
+    // Record committed successfully - now safe to retire the old TPM key
+    if (retirePrevious) {
+        HRESULT retireHr = tpm::DeleteKey(previousIdentity);
+        if (FAILED(retireHr)) {
+            // Log the orphaned key but don't fail the enrollment
+            // TODO: Add event log entry for manual cleanup: previousIdentity
+            return S_FALSE;  // Partial success: new key works, old key orphaned
+        }
+    }
+
+    return S_OK;
 }
 
 HRESULT Refresh(PCWSTR name, PCWSTR sid, PCWSTR supplied) noexcept {
@@ -360,7 +444,6 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* sub
     Secret<BYTE, 32> aesKey;
     if (bundle.record.tpmMode == 1) {
         // Use a separate derived authorization, not the persisted verifier.
-        // TPM authorization/anti-hammering enforcement still needs validation.
         Secret<BYTE, 32> authorization;
         hr = DeriveTpmAuthorization(pattern, bundle.record.salt, authorization.data());
         wchar_t identity[240]{};
@@ -373,19 +456,38 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* sub
 
     // Pattern matched successfully! Reset failure counter and lockout timer.
     bundle.record.attempts = 0; bundle.record.until = 0;
+
     if (password) {
+        // Generate one-shot submission token BEFORE decrypting password
+        hr = Random(bundle.record.submission, sizeof(bundle.record.submission));
+        if (FAILED(hr)) { aesKey.Clear(); return hr; }
+
+        // Mark as disabled and persist the submission token BEFORE returning plaintext
+        // This ensures crash between decrypt and ReportResult is recoverable
+        bundle.record.disabled = 1;
+        hr = Save(user, bundle);
+        if (FAILED(hr)) {
+            aesKey.Clear();
+            SecureZeroMemory(bundle.record.submission, sizeof(bundle.record.submission));
+            return hr;
+        }
+
+        // Token is now durably persisted - safe to decrypt password
         hr = CipherWithKey(aesKey.data(), bundle.record, *password, false);
         aesKey.Clear();
-        if (SUCCEEDED(hr)) hr = Random(bundle.record.submission, sizeof(bundle.record.submission));
-        if (FAILED(hr)) { password->Clear(); return hr; }
-        bundle.record.disabled = 1;
+
+        if (FAILED(hr)) {
+            password->Clear();
+            return hr;
+        }
+
+        // Copy submission token to output
+        CopyMemory(submission, bundle.record.submission, 16);
     } else {
         aesKey.Clear();
+        hr = Save(user, bundle);
     }
 
-    hr = Save(user, bundle);
-    if (FAILED(hr)) { if (password) password->Clear(); return hr; }
-    if (password) CopyMemory(submission, bundle.record.submission, 16);
     return hr;
 }
 

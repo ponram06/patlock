@@ -82,14 +82,93 @@ HRESULT Decrypt(NCRYPT_KEY_HANDLE key, const BYTE wrapped[256], BYTE plain[32]) 
 HRESULT Probe() noexcept {
     TPM_DEVICE_INFO info{};
     const TBS_RESULT result = Tbsi_GetDeviceInfo(sizeof(info), &info);
+    // S_FALSE: definitively no TPM hardware (permits baseline fallback)
     if (result == TBS_E_TPM_NOT_FOUND) return S_FALSE;
-    if (result != TBS_SUCCESS) return static_cast<HRESULT>(result);
+    // Other TBS failures: TPM exists but unavailable (abort enrollment)
+    if (result != TBS_SUCCESS) return E_FAIL;
+
+    // Attempt to open Platform Crypto Provider
     ProvHandle provider;
     const SECURITY_STATUS status = NCryptOpenStorageProvider(
         &provider.h, MS_PLATFORM_CRYPTO_PROVIDER, 0);
-    return Status(status);
+
+    // Provider doesn't exist: no TPM support (baseline fallback permitted)
+    if (status == NTE_NOT_SUPPORTED || status == NTE_PROV_TYPE_NOT_DEF) return S_FALSE;
+
+    // Provider exists but failed to open: TPM present but unavailable (abort enrollment)
+    if (status != ERROR_SUCCESS) return E_FAIL;
+
+    return S_OK;
 }
+
 bool Available() noexcept { return Probe() == S_OK; }
+
+HRESULT ValidateAuthorization() noexcept {
+    // Create a unique test key name with timestamp to avoid collisions
+    ULONGLONG timestamp = 0;
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER uli{};
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    timestamp = uli.QuadPart;
+
+    wchar_t testKeyName[kMaxKeyName]{};
+    StringCchPrintfW(testKeyName, kMaxKeyName, L"PatlockAuthTest_%016llx", timestamp);
+
+    // Generate test data
+    BYTE authCorrect[32]{}, authWrong[32]{}, plaintext[32]{}, wrapped[256]{};
+    if (BCryptGenRandom(nullptr, authCorrect, 32, BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0 ||
+        BCryptGenRandom(nullptr, authWrong, 32, BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0 ||
+        BCryptGenRandom(nullptr, plaintext, 32, BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) {
+        return E_FAIL;
+    }
+
+    // Ensure authWrong is different from authCorrect
+    authWrong[0] ^= 0xFF;
+
+    // Create and wrap with correct auth
+    HRESULT hr = ProtectKey(testKeyName, authCorrect, plaintext, wrapped);
+    if (FAILED(hr)) {
+        DeleteKey(testKeyName);  // Clean up if exists
+        return hr;
+    }
+
+    // Attempt decrypt with WRONG authorization (must fail)
+    BYTE recovered[32]{};
+    HRESULT hrWrong = UnprotectKey(testKeyName, authWrong, wrapped, recovered);
+    SecureZeroMemory(recovered, sizeof(recovered));
+
+    if (SUCCEEDED(hrWrong)) {
+        // TPM accepted wrong authorization - enforcement is broken!
+        DeleteKey(testKeyName);
+        return E_FAIL;
+    }
+
+    // Attempt decrypt with CORRECT authorization (must succeed)
+    HRESULT hrCorrect = UnprotectKey(testKeyName, authCorrect, wrapped, recovered);
+
+    // Verify decrypted data matches original
+    bool match = SUCCEEDED(hrCorrect);
+    if (match) {
+        for (size_t i = 0; i < 32; ++i) {
+            if (recovered[i] != plaintext[i]) {
+                match = false;
+                break;
+            }
+        }
+    }
+
+    SecureZeroMemory(recovered, sizeof(recovered));
+    SecureZeroMemory(plaintext, sizeof(plaintext));
+    SecureZeroMemory(authCorrect, sizeof(authCorrect));
+    SecureZeroMemory(authWrong, sizeof(authWrong));
+
+    // Clean up test key
+    DeleteKey(testKeyName);
+
+    return match ? S_OK : E_FAIL;
+}
 
 HRESULT ProtectKey(PCWSTR identity, const BYTE authValue[32], const BYTE plainKey[32],
                    BYTE wrappedKey[256]) noexcept {
