@@ -14,6 +14,7 @@
 #endif
 #include <unknwn.h>
 #include <string>
+#include <memory>
 #include "CSampleCredential.h"
 #include "CSampleProvider.h"
 #include "guid.h"
@@ -258,6 +259,7 @@ HRESULT CSampleCredential::SetSelected(_Out_ BOOL *pbAutoLogon)
 HRESULT CSampleCredential::SetDeselected()
 {
     _selected = false;
+    patlock::CloseActivePatternWindow();
     if (_launchTimerId) {
         KillTimer(nullptr, _launchTimerId);
         _launchTimerId = 0;
@@ -538,63 +540,80 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID) try
         return S_OK;
     }
 
-    patlock::Password decryptedPassword;
-    patlock::Secret<BYTE, 16> submissionToken;
+    // The window is modeless: this call returns immediately and the result arrives
+    // later in the completion callback below. A nested modal loop here blocks
+    // LogonUI, so "Sign-in options" and user switching stop working.
+    struct Secrets {
+        patlock::Password password;
+        patlock::Secret<BYTE, 16> token;
+    };
+    auto secrets = std::make_shared<Secrets>();
 
     // In-window Android-style instant verification:
-    // If wrong pattern: flashes red for 900ms and auto-clears inside the window so the user can immediately redraw
-    // If correct pattern: flashes green and auto-submits to log in
-    auto verifier = [this, &decryptedPassword, &submissionToken](const patlock::Pattern& pat) -> patlock::VerifyResult {
+    // wrong pattern flashes red and clears inside the window; a correct one flashes
+    // green and closes the window, then the callback below auto-submits.
+    auto verifier = [this, secrets](const patlock::Pattern& pat) -> patlock::VerifyResult {
         if (!_fIsLocalUser) return patlock::VerifyResult::Error;
         patlock::Secret<BYTE, 16> sub;
-        HRESULT vhr = patlock::Verify(_pszUserSid, pat, &decryptedPassword, sub.data());
+        HRESULT vhr = patlock::Verify(_pszUserSid, pat, &secrets->password, sub.data());
         if (SUCCEEDED(vhr)) {
-            CopyMemory(submissionToken.data(), sub.data(), 16);
+            CopyMemory(secrets->token.data(), sub.data(), 16);
             return patlock::VerifyResult::Success;
         }
-        decryptedPassword.Clear();
+        secrets->password.Clear();
         if (FAILED(patlock::Eligible(_pszUserSid))) {
             return patlock::VerifyResult::Lockout;
         }
         return patlock::VerifyResult::WrongPattern;
     };
 
+    auto finished = [this, secrets](HRESULT result, const patlock::Pattern&) {
+        try {
+            _dialogOpen = false;
+            _pattern.Clear();
+            if (_selected && result == S_OK) {
+                if (_rgFieldStrings[SFI_PASSWORD]) {
+                    SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], (wcslen(_rgFieldStrings[SFI_PASSWORD]) + 1) * sizeof(wchar_t));
+                    CoTaskMemFree(_rgFieldStrings[SFI_PASSWORD]);
+                    _rgFieldStrings[SFI_PASSWORD] = nullptr;
+                }
+                const HRESULT shr = SHStrDupW(secrets->password.data(), &_rgFieldStrings[SFI_PASSWORD]);
+                secrets->password.Clear();
+                CopyMemory(_submission.data(), secrets->token.data(), 16);
+                secrets->token.Clear();
+                if (SUCCEEDED(shr)) {
+                    _patternReady = true;
+                    if (_pCredProvCredentialEvents) {
+                        _pCredProvCredentialEvents->SetFieldState(this, SFI_SUBMIT_BUTTON, CPFS_DISPLAY_IN_SELECTED_TILE);
+                        _pCredProvCredentialEvents->SetFieldInteractiveState(this, SFI_SUBMIT_BUTTON, CPFIS_FOCUSED);
+                    }
+                    // Official auto-logon: CredentialsChanged makes LogonUI call GetSerialization.
+                    if (_pProvider) _pProvider->TriggerAutoLogon(this);
+                }
+            } else {
+                secrets->password.Clear();
+                secrets->token.Clear();
+            }
+        } catch (...) {
+            _patternReady = false; _submission.Clear();
+            secrets->password.Clear(); secrets->token.Clear();
+            if (_rgFieldStrings[SFI_PASSWORD]) SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD],
+                (wcslen(_rgFieldStrings[SFI_PASSWORD]) + 1) * sizeof(wchar_t));
+        }
+        Release(); // Balances the AddRef taken before the window was created.
+    };
+
     _dialogOpen = true;
-    hr = patlock::DrawPatternInteractive(HINST_THISDLL, owner, _fChecked != FALSE, verifier, _pattern,
+    AddRef();
+    hr = patlock::ShowPatternWindow(HINST_THISDLL, owner, _fChecked != FALSE, verifier,
         [this](DWORD* seconds) { return patlock::QueryRetryAfter(_pszUserSid, seconds); },
-        _pszDisplayName);
-    _dialogOpen = false;
-    _pattern.Clear();
-    if (!_selected) { _pattern.Clear(); decryptedPassword.Clear(); return S_OK; }
-    if (hr == S_OK) {
-        // Pattern was verified inside the window! Stash decrypted password into credential buffer
-        if (_rgFieldStrings[SFI_PASSWORD]) {
-            SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD], (wcslen(_rgFieldStrings[SFI_PASSWORD]) + 1) * sizeof(wchar_t));
-            CoTaskMemFree(_rgFieldStrings[SFI_PASSWORD]);
-            _rgFieldStrings[SFI_PASSWORD] = nullptr;
-        }
-        hr = SHStrDupW(decryptedPassword.data(), &_rgFieldStrings[SFI_PASSWORD]);
-        decryptedPassword.Clear();
-        CopyMemory(_submission.data(), submissionToken.data(), 16);
-        submissionToken.Clear();
-        if (FAILED(hr)) return hr;
-
-        _patternReady = true;
-
-        // Make submit button visible on tile as fallback / visual confirmation
-        if (_pCredProvCredentialEvents) {
-            _pCredProvCredentialEvents->SetFieldState(this, SFI_SUBMIT_BUTTON, CPFS_DISPLAY_IN_SELECTED_TILE);
-            _pCredProvCredentialEvents->SetFieldInteractiveState(this, SFI_SUBMIT_BUTTON, CPFIS_FOCUSED);
-        }
-
-        // Trigger official Windows Credential Provider auto-logon via CredentialsChanged:
-        // LogonUI queries GetCredentialCount, which returns *pbAutoLogonWithDefault = TRUE,
-        // and immediately calls GetSerialization without requiring any keypresses!
-        if (_pProvider) {
-            _pProvider->TriggerAutoLogon(this);
-        }
+        _pszDisplayName, finished);
+    if (FAILED(hr)) {
+        _dialogOpen = false;
+        Release();
+        return hr;
     }
-    return FAILED(hr) ? hr : S_OK;
+    return S_OK;
 }
 catch (...) {
     _dialogOpen = false; _patternReady = false; _pattern.Clear(); _submission.Clear();

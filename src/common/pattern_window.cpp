@@ -12,6 +12,7 @@
 #include <oleauto.h>
 #include <uiautomation.h>
 #include <memory>
+#include <atomic>
 #include <string>
 
 #pragma comment(lib, "gdiplus.lib")
@@ -114,7 +115,23 @@ struct State {
     double scale = 1.0;
     RECT anchor{};          // Native username bounds in screen pixels (UI Automation).
     bool hasAnchor = false;
+    PatternDone onDone = nullptr;
+    ULONG_PTR gdiplusToken = 0;
+    bool finished = false;
+    INT_PTR resultCode = IDCANCEL;
 };
+
+// The window is modeless: it must never run its own message loop inside LogonUI,
+// or LogonUI cannot process clicks on "Sign-in options" / the user list. Every
+// close request is posted here and handled on the window's own thread.
+constexpr UINT kMsgEnd = WM_APP + 1;
+void EndPattern(HWND window, INT_PTR code) noexcept {
+    if (window) PostMessageW(window, kMsgEnd, static_cast<WPARAM>(code), 0);
+}
+
+// The currently open pattern dialog, so the provider can close it when LogonUI
+// deselects the tile (user clicked "Sign-in options" or another user).
+std::atomic<HWND> g_activeWindow{nullptr};
 
 // ── Native username anchor (UI Automation) ───────────────────────────────────
 // LogonUI draws the avatar/username/"Sign-in options" itself and exposes no
@@ -144,14 +161,28 @@ DWORD WINAPI AnchorThread(LPVOID param) noexcept {
             value.bstrVal = SysAllocString(query.name.c_str());
             IUIAutomationCondition* condition = nullptr;
             if (value.bstrVal && SUCCEEDED(uia->CreatePropertyCondition(UIA_NamePropertyId, value, &condition)) && condition) {
-                IUIAutomationElement* element = nullptr;
-                if (SUCCEEDED(root->FindFirst(TreeScope_Descendants, condition, &element)) && element) {
-                    RECT r{};
-                    if (SUCCEEDED(element->get_CurrentBoundingRectangle(&r)) && r.right > r.left && r.bottom > r.top) {
-                        query.rect = r;
-                        query.found = true;
+                // Several elements can share the username as their Name (the whole
+                // tile container, the avatar group, the text). The text is the
+                // smallest one, so take that and ignore anything tall.
+                IUIAutomationElementArray* items = nullptr;
+                if (SUCCEEDED(root->FindAll(TreeScope_Descendants, condition, &items)) && items) {
+                    int count = 0;
+                    items->get_Length(&count);
+                    LONG bestArea = LONG_MAX;
+                    for (int i = 0; i < count; ++i) {
+                        IUIAutomationElement* element = nullptr;
+                        if (FAILED(items->GetElement(i, &element)) || !element) continue;
+                        BOOL offscreen = FALSE;
+                        RECT r{};
+                        element->get_CurrentIsOffscreen(&offscreen);
+                        if (!offscreen && SUCCEEDED(element->get_CurrentBoundingRectangle(&r)) &&
+                            r.right > r.left && r.bottom > r.top && (r.bottom - r.top) <= 140) {
+                            const LONG area = (r.right - r.left) * (r.bottom - r.top);
+                            if (area < bestArea) { bestArea = area; query.rect = r; query.found = true; }
+                        }
+                        element->Release();
                     }
-                    element->Release();
+                    items->Release();
                 }
                 condition->Release();
             }
@@ -189,6 +220,10 @@ bool FindUsernameAnchor(HWND owner, const wchar_t* name, RECT* out) noexcept {
         }
         const bool finished = WaitForSingleObject(thread, 0) == WAIT_OBJECT_0;
         CloseHandle(thread); // On timeout the worker finishes alone; it owns its own shared_ptr.
+        wchar_t log[160];
+        StringCchPrintfW(log, ARRAYSIZE(log), L"patlock: username anchor finished=%d found=%d rect=%ld,%ld,%ld,%ld\n",
+            finished ? 1 : 0, query->found ? 1 : 0, query->rect.left, query->rect.top, query->rect.right, query->rect.bottom);
+        OutputDebugStringW(log);
         if (!finished || !query->found) return false;
         *out = query->rect;
         return true;
@@ -316,9 +351,9 @@ bool RefreshRetry(HWND window, State& state) noexcept {
     if (state.retryDelay) {
         HRESULT hr = E_FAIL;
         try { hr = state.retryDelay(&state.retrySeconds); }
-        catch (...) { state.pattern.Clear(); EndDialog(window, -1); return false; }
+        catch (...) { state.pattern.Clear(); EndPattern(window, -1); return false; }
         if (hr == S_OK) state.passwordRequired = false;
-        else if (hr != E_ACCESSDENIED) { state.pattern.Clear(); EndDialog(window, -1); return false; }
+        else if (hr != E_ACCESSDENIED) { state.pattern.Clear(); EndPattern(window, -1); return false; }
     }
     return true;
 }
@@ -338,7 +373,7 @@ void ResetStroke(HWND window, State& state) noexcept {
     state.hoverDot = -1;
     if (GetCapture() == window) ReleaseCapture();
     POINT cursor{};
-    if (!GetCursorPos(&cursor) || !ScreenToClient(window, &cursor)) { EndDialog(window, -1); return; }
+    if (!GetCursorPos(&cursor) || !ScreenToClient(window, &cursor)) { EndPattern(window, -1); return; }
     const Layout grid = Grid(window);
     state.observedCursor = cursor;
     state.gate.Disarm(static_cast<int>(cursor.x / state.scale), static_cast<int>(cursor.y / state.scale),
@@ -383,7 +418,7 @@ void FinishPattern(HWND window, State& state) noexcept {
             state.visual = VisualState::ErrorTooShort;
             if (GetCapture() == window) ReleaseCapture();
             UpdateStatus(window, state);
-            if (!SetTimer(window, kTimerTooShort, kTooShortFlashMs, nullptr)) EndDialog(window, -1);
+            if (!SetTimer(window, kTimerTooShort, kTooShortFlashMs, nullptr)) EndPattern(window, -1);
         } else {
             ResetStroke(window, state);
         }
@@ -400,28 +435,28 @@ void FinishPattern(HWND window, State& state) noexcept {
         UpdateWindow(window);
         VerifyResult result = VerifyResult::Error;
         try { result = state.verifier(state.pattern); }
-        catch (...) { state.pattern.Clear(); EndDialog(window, -1); return; }
-        if (result == VerifyResult::Error) { state.pattern.Clear(); EndDialog(window, -1); return; }
+        catch (...) { state.pattern.Clear(); EndPattern(window, -1); return; }
+        if (result == VerifyResult::Error) { state.pattern.Clear(); EndPattern(window, -1); return; }
         if (result == VerifyResult::Success) {
             state.visual = VisualState::Success;
             UpdateStatus(window, state);
-            if (!SetTimer(window, kTimerSuccess, kSuccessFlashMs, nullptr)) { state.pattern.Clear(); EndDialog(window, -1); }
+            if (!SetTimer(window, kTimerSuccess, kSuccessFlashMs, nullptr)) { state.pattern.Clear(); EndPattern(window, -1); }
         } else if (result == VerifyResult::Lockout) {
             state.visual = VisualState::ErrorLockout;
             state.pattern.Clear();
             if (!RefreshRetry(window, state)) return;
             UpdateStatus(window, state);
-            if (!state.passwordRequired && !SetTimer(window, kTimerRetry, 1000, nullptr)) EndDialog(window, -1);
+            if (!state.passwordRequired && !SetTimer(window, kTimerRetry, 1000, nullptr)) EndPattern(window, -1);
         } else {
             // Wrong pattern: flash red for 800ms, then reset stroke for instant retry
             state.visual = VisualState::ErrorWrong;
             UpdateStatus(window, state);
-            if (!SetTimer(window, kTimerRetry, kWrongFlashMs, nullptr)) { state.pattern.Clear(); EndDialog(window, -1); }
+            if (!SetTimer(window, kTimerRetry, kWrongFlashMs, nullptr)) { state.pattern.Clear(); EndPattern(window, -1); }
         }
     } else {
         state.visual = VisualState::Success;
         UpdateStatus(window, state);
-        EndDialog(window, IDOK);
+        EndPattern(window, IDOK);
     }
 }
 
@@ -442,11 +477,13 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         state = reinterpret_cast<State*>(lp);
         SetWindowLongPtrW(window, DWLP_USER, lp);
         SetWindowTextW(window, L"Patlock");
+        g_activeWindow.store(window);
+        state->finished = false;
 
         // Transparent layered window for floating rounded corners
         LONG_PTR exStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
         SetWindowLongPtrW(window, GWL_EXSTYLE, exStyle | WS_EX_LAYERED);
-        if (!SetLayeredWindowAttributes(window, TransparentKey, 0, LWA_COLORKEY)) { EndDialog(window, -1); return TRUE; }
+        if (!SetLayeredWindowAttributes(window, TransparentKey, 0, LWA_COLORKEY)) { EndPattern(window, -1); return TRUE; }
 
         // Zero-size, invisible, not a tab stop: the native "Sign-in options" row
         // below the grid is the fallback now. Esc still closes the dialog.
@@ -457,7 +494,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             WS_CHILD | WS_VISIBLE | SS_CENTER, 0, 0, 0, 0,
             window, reinterpret_cast<HMENU>(1001), nullptr, nullptr);
         if (!state->fallback || !state->status || !Configure(window, *state, GetDpiForWindow(window), nullptr)) {
-            EndDialog(window, -1); return TRUE;
+            EndPattern(window, -1); return TRUE;
         }
         SetFocus(window);
         ResetStroke(window, *state);
@@ -466,18 +503,45 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             if (state->passwordRequired || state->retrySeconds) {
                 state->visual = VisualState::ErrorLockout;
                 UpdateStatus(window, *state);
-                if (!state->passwordRequired && !SetTimer(window, kTimerRetry, 1000, nullptr)) { EndDialog(window, -1); return FALSE; }
+                if (!state->passwordRequired && !SetTimer(window, kTimerRetry, 1000, nullptr)) { EndPattern(window, -1); return FALSE; }
             }
         }
 
-        if (!SetTimer(window, kTimerInactivity, kInactivityTimeoutMs, nullptr)) EndDialog(window, -1);
-        if (!SetTimer(window, kTimerPoll, kCursorPollMs, nullptr)) EndDialog(window, -1);
+        if (!SetTimer(window, kTimerInactivity, kInactivityTimeoutMs, nullptr)) EndPattern(window, -1);
+        if (!SetTimer(window, kTimerPoll, kCursorPollMs, nullptr)) EndPattern(window, -1);
         return FALSE; // Focus was explicitly assigned to the dialog itself.
     }
+    if (message == WM_NCDESTROY) {
+        HWND expected = window;
+        g_activeWindow.compare_exchange_strong(expected, nullptr);
+        if (state) {
+            SetWindowLongPtrW(window, DWLP_USER, 0);
+            const HRESULT hr = (state->resultCode == IDOK && state->pattern.Valid()) ? S_OK
+                : (state->resultCode == IDCANCEL ? S_FALSE : E_FAIL);
+            PatternDone done = std::move(state->onDone);
+            Pattern pattern = state->pattern;
+            const ULONG_PTR token = state->gdiplusToken;
+            state->pattern.Clear();
+            delete state;
+            Gdiplus::GdiplusShutdown(token);
+            if (done) done(hr, pattern);
+            pattern.Clear();
+        }
+        return FALSE;
+    }
     if (!state) return FALSE;
+    if (message == kMsgEnd) {
+        if (!state->finished) {
+            state->finished = true;
+            state->resultCode = static_cast<INT_PTR>(wp);
+            if (GetCapture() == window) ReleaseCapture();
+            DestroyWindow(window);
+        }
+        return TRUE;
+    }
 
     if (message == WM_LBUTTONDOWN || message == WM_MOUSEMOVE || message == WM_LBUTTONUP) {
-        if (!SetTimer(window, kTimerInactivity, kInactivityTimeoutMs, nullptr)) { state->pattern.Clear(); EndDialog(window, -1); return TRUE; }
+        if (!SetTimer(window, kTimerInactivity, kInactivityTimeoutMs, nullptr)) { state->pattern.Clear(); EndPattern(window, -1); return TRUE; }
     }
 
     switch (message) {
@@ -486,10 +550,10 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             // Color-keyed transparent areas pass mouse messages through. Sample
             // actual cursor movement so generous hit targets still work there.
             // Stationary samples do not reset inactivity or hover deadlines.
-            if (state->visual != VisualState::Drawing || GetActiveWindow() != window) return TRUE;
+            if (state->visual != VisualState::Drawing || !IsWindowVisible(window)) return TRUE;
             POINT current{}; RECT bounds{};
             if (!GetCursorPos(&current) || !ScreenToClient(window, &current) || !GetClientRect(window, &bounds)) {
-                EndDialog(window, -1); return TRUE;
+                EndPattern(window, -1); return TRUE;
             }
             if (current.x != state->observedCursor.x || current.y != state->observedCursor.y) {
                 state->observedCursor = current;
@@ -504,15 +568,15 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             if (!state->startDue) return TRUE;
             const UINT remaining = HoverPolicy::Remaining(GetTickCount64(), state->startDue);
             if (remaining) {
-                if (!SetTimer(window, kTimerStart, remaining, nullptr)) EndDialog(window, -1);
+                if (!SetTimer(window, kTimerStart, remaining, nullptr)) EndPattern(window, -1);
                 return TRUE;
             }
             KillTimer(window, kTimerStart);
             state->startDue = 0;
             POINT current{};
-            if (!GetCursorPos(&current) || !ScreenToClient(window, &current)) { EndDialog(window, -1); return TRUE; }
+            if (!GetCursorPos(&current) || !ScreenToClient(window, &current)) { EndPattern(window, -1); return TRUE; }
             const int actualDot = DotAt(window, current, Grid(window).hitRadius);
-            if (GetActiveWindow() != window) { ResetStroke(window, *state); return TRUE; }
+            if (!IsWindowVisible(window)) { ResetStroke(window, *state); return TRUE; }
             if (HoverPolicy::CanStart(state->pendingStartDot, actualDot, state->gate.Armed(),
                 state->dragging, state->visual == VisualState::Drawing)) {
                 state->pendingStartDot = -1;
@@ -524,7 +588,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 if (GetCapture() != window) { ResetStroke(window, *state); return TRUE; }
                 state->pattern.Add(static_cast<BYTE>(actualDot));
                 state->shortDue = GetTickCount64() + HoverPolicy::ShortStrokeDelayMs;
-                if (!SetTimer(window, kTimerShort, HoverPolicy::ShortStrokeDelayMs, nullptr)) { EndDialog(window, -1); return TRUE; }
+                if (!SetTimer(window, kTimerShort, HoverPolicy::ShortStrokeDelayMs, nullptr)) { EndPattern(window, -1); return TRUE; }
                 UpdateStatus(window, *state);
             } else state->pendingStartDot = -1;
             return TRUE;
@@ -534,16 +598,16 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             if (!deadline) return TRUE;
             const UINT remaining = HoverPolicy::Remaining(GetTickCount64(), deadline);
             if (remaining) {
-                if (!SetTimer(window, wp, remaining, nullptr)) EndDialog(window, -1);
+                if (!SetTimer(window, wp, remaining, nullptr)) EndPattern(window, -1);
                 return TRUE;
             }
             KillTimer(window, wp); deadline = 0;
             if (!state->hoverStroke || !state->dragging || state->visual != VisualState::Drawing) return TRUE;
             POINT current{}; RECT bounds{};
             if (!GetCursorPos(&current) || !ScreenToClient(window, &current) || !GetClientRect(window, &bounds)) {
-                EndDialog(window, -1); return TRUE;
+                EndPattern(window, -1); return TRUE;
             }
-            if (GetActiveWindow() != window || GetCapture() != window || !PtInRect(&bounds, current)) {
+            if (!IsWindowVisible(window) || GetCapture() != window || !PtInRect(&bounds, current)) {
                 ResetStroke(window, *state); return TRUE;
             }
             RECT fallback{};
@@ -560,7 +624,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 const UINT delay = state->pattern.Valid() ? HoverPolicy::FinishDelayMs : HoverPolicy::ShortStrokeDelayMs;
                 state->finishDue = state->shortDue = 0;
                 (timer == kTimerFinish ? state->finishDue : state->shortDue) = GetTickCount64() + delay;
-                if (!SetTimer(window, timer, delay, nullptr)) EndDialog(window, -1);
+                if (!SetTimer(window, timer, delay, nullptr)) EndPattern(window, -1);
                 return TRUE;
             }
             if ((wp == kTimerFinish && HoverPolicy::CanFinish(state->hoverStroke, state->dragging, state->pattern.Valid(), true)) ||
@@ -570,12 +634,12 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         if (wp == kTimerInactivity) {
             state->pattern.Clear();
             if (GetCapture() == window) ReleaseCapture();
-            EndDialog(window, IDCANCEL);
+            EndPattern(window, IDCANCEL);
             return TRUE;
         }
         if (wp == kTimerSuccess) {
             KillTimer(window, kTimerSuccess);
-            EndDialog(window, IDOK);
+            EndPattern(window, IDOK);
             return TRUE;
         }
         if (wp == kTimerTooShort) {
@@ -590,7 +654,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 if (!state->passwordRequired && state->retrySeconds == 0) ResetStroke(window, *state);
                 else {
                     UpdateStatus(window, *state);
-                    if (!state->passwordRequired && !SetTimer(window, kTimerRetry, 1000, nullptr)) EndDialog(window, -1);
+                    if (!state->passwordRequired && !SetTimer(window, kTimerRetry, 1000, nullptr)) EndPattern(window, -1);
                 }
             } else if (state->visual == VisualState::ErrorWrong) ResetStroke(window, *state);
             return TRUE;
@@ -615,7 +679,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         if (PtInRect(&fallback, current)) {
             state->pattern.Clear(); state->dragging = false;
             if (GetCapture() == window) ReleaseCapture();
-            EndDialog(window, IDCANCEL); return TRUE;
+            EndPattern(window, IDCANCEL); return TRUE;
         }
 
         if (state->visual != VisualState::Drawing || state->dragging) return TRUE;
@@ -667,14 +731,14 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                     const UINT_PTR timer = state->pattern.Valid() ? kTimerFinish : kTimerShort;
                     const UINT delay = state->pattern.Valid() ? HoverPolicy::FinishDelayMs : HoverPolicy::ShortStrokeDelayMs;
                     (timer == kTimerFinish ? state->finishDue : state->shortDue) = GetTickCount64() + delay;
-                    if (!SetTimer(window, timer, delay, nullptr)) { state->pattern.Clear(); EndDialog(window, -1); return TRUE; }
+                    if (!SetTimer(window, timer, delay, nullptr)) { state->pattern.Clear(); EndPattern(window, -1); return TRUE; }
                 }
             }
         } else if (state->gate.Armed() && state->hoverDot >= 0) {
             if (state->pendingStartDot != state->hoverDot) {
                 state->pendingStartDot = state->hoverDot;
                 state->startDue = GetTickCount64() + HoverPolicy::StartDelayMs;
-                if (!SetTimer(window, kTimerStart, HoverPolicy::StartDelayMs, nullptr)) { EndDialog(window, -1); return TRUE; }
+                if (!SetTimer(window, kTimerStart, HoverPolicy::StartDelayMs, nullptr)) { EndPattern(window, -1); return TRUE; }
             }
         } else {
             state->pendingStartDot = -1;
@@ -703,21 +767,21 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         if (LOWORD(wp) == IDCANCEL) {
             state->pattern.Clear();
             if (GetCapture() == window) ReleaseCapture();
-            EndDialog(window, IDCANCEL);
+            EndPattern(window, IDCANCEL);
             return TRUE;
         }
         return FALSE;
 
     case WM_DPICHANGED:
         if (state->visual == VisualState::Drawing) ResetStroke(window, *state);
-        if (!Configure(window, *state, LOWORD(wp), reinterpret_cast<const RECT*>(lp))) EndDialog(window, -1);
+        if (!Configure(window, *state, LOWORD(wp), reinterpret_cast<const RECT*>(lp))) EndPattern(window, -1);
         else if (state->visual == VisualState::Drawing) ResetStroke(window, *state);
         return TRUE;
 
     case WM_SETTINGCHANGE:
     case WM_SYSCOLORCHANGE:
         if (state->visual == VisualState::Drawing) ResetStroke(window, *state);
-        if (!Configure(window, *state, GetDpiForWindow(window), nullptr)) EndDialog(window, -1);
+        if (!Configure(window, *state, GetDpiForWindow(window), nullptr)) EndPattern(window, -1);
         else if (state->visual == VisualState::Drawing) ResetStroke(window, *state);
         return TRUE;
 
@@ -768,7 +832,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
     case WM_CLOSE:
         state->pattern.Clear();
         if (GetCapture() == window) ReleaseCapture();
-        EndDialog(window, IDCANCEL);
+        EndPattern(window, IDCANCEL);
         return TRUE;
 
     // ── GDI+ Anti-Aliased Fluent Surface Rendering ───────────────────────────
@@ -786,12 +850,12 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             if (memBmp) DeleteObject(memBmp);
             if (memDC) DeleteDC(memDC);
             EndPaint(window, &paint);
-            state->pattern.Clear(); EndDialog(window, -1); return TRUE;
+            state->pattern.Clear(); EndPattern(window, -1); return TRUE;
         }
         HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
         if (!oldBmp || oldBmp == HGDI_ERROR) {
             DeleteObject(memBmp); DeleteDC(memDC); EndPaint(window, &paint);
-            state->pattern.Clear(); EndDialog(window, -1); return TRUE;
+            state->pattern.Clear(); EndPattern(window, -1); return TRUE;
         }
 
         // 1) Fill outside with TransparentKey (outer margin)
@@ -800,7 +864,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         if (keyBrush) DeleteObject(keyBrush);
         if (!filled) {
             SelectObject(memDC, oldBmp); DeleteObject(memBmp); DeleteDC(memDC); EndPaint(window, &paint);
-            state->pattern.Clear(); EndDialog(window, -1); return TRUE;
+            state->pattern.Clear(); EndPattern(window, -1); return TRUE;
         }
 
         {
@@ -907,7 +971,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         DeleteObject(memBmp);
         DeleteDC(memDC);
         EndPaint(window, &paint);
-        if (!copied) { state->pattern.Clear(); EndDialog(window, -1); }
+        if (!copied) { state->pattern.Clear(); EndPattern(window, -1); }
         return TRUE;
     }
     }
@@ -916,6 +980,54 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
 } // anon namespace
 
+HRESULT ShowPatternWindow(
+    HINSTANCE instance,
+    HWND owner,
+    bool hideTrail,
+    PatternVerifier verifier,
+    RetryDelay retryDelay,
+    const wchar_t* anchorName,
+    PatternDone onDone) noexcept
+{
+    if (g_activeWindow.load()) return E_UNEXPECTED; // One pattern window at a time.
+
+    ULONG_PTR gdiplusToken = 0;
+    Gdiplus::GdiplusStartupInput gdiplusStartupInput;
+    if (Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr) != Gdiplus::Ok) return E_FAIL;
+
+    State* state = nullptr;
+    try {
+        state = new State();
+        state->hide = hideTrail;
+        state->verifier = std::move(verifier);
+        state->retryDelay = std::move(retryDelay);
+        state->onDone = std::move(onDone);
+        state->gdiplusToken = gdiplusToken;
+    } catch (...) {
+        delete state;
+        Gdiplus::GdiplusShutdown(gdiplusToken);
+        return E_OUTOFMEMORY;
+    }
+    state->hasAnchor = FindUsernameAnchor(owner, anchorName, &state->anchor);
+
+    alignas(DWORD) BYTE buffer[sizeof(DLGTEMPLATE) + 3 * sizeof(WORD)]{};
+    auto* dialog = reinterpret_cast<DLGTEMPLATE*>(buffer);
+    dialog->style = WS_POPUP | WS_CLIPCHILDREN | WS_VISIBLE;
+    dialog->cx = 200;
+    dialog->cy = 200;
+    HWND window = CreateDialogIndirectParamW(instance, dialog, owner, Dialog, reinterpret_cast<LPARAM>(state));
+    if (!window) {
+        // WM_INITDIALOG never ran, so nothing owns the state yet.
+        state->onDone = nullptr;
+        delete state;
+        Gdiplus::GdiplusShutdown(gdiplusToken);
+        return E_FAIL;
+    }
+    return S_OK; // From here the window owns the state and calls onDone exactly once.
+}
+
+// Blocking wrapper for the standalone demo only. The lock screen must use
+// ShowPatternWindow so LogonUI keeps pumping its own messages.
 HRESULT DrawPatternInteractive(
     HINSTANCE instance,
     HWND owner,
@@ -926,34 +1038,26 @@ HRESULT DrawPatternInteractive(
     const wchar_t* anchorName) noexcept
 {
     output.Clear();
-
-    // Initialize GDI+ for anti-aliasing
-    ULONG_PTR gdiplusToken = 0;
-    Gdiplus::GdiplusStartupInput gdiplusStartupInput;
-    if (Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr) != Gdiplus::Ok) return E_FAIL;
-
-    alignas(DWORD) BYTE buffer[sizeof(DLGTEMPLATE) + 3 * sizeof(WORD)]{};
-    auto* dialog = reinterpret_cast<DLGTEMPLATE*>(buffer);
-    dialog->style = WS_POPUP | WS_CLIPCHILDREN;
-    dialog->cx = 200;
-    dialog->cy = 200;
-    State state;
-    state.hide = hideTrail;
-    state.hasAnchor = FindUsernameAnchor(owner, anchorName, &state.anchor);
-    try { state.verifier = verifier; state.retryDelay = retryDelay; }
-    catch (...) { Gdiplus::GdiplusShutdown(gdiplusToken); return E_OUTOFMEMORY; }
-    const INT_PTR result = DialogBoxIndirectParamW(instance, dialog, owner, Dialog, reinterpret_cast<LPARAM>(&state));
-
-    Gdiplus::GdiplusShutdown(gdiplusToken);
-
-    if (result == IDOK && state.pattern.Valid()) {
-        output = state.pattern;
-        state.pattern.Clear();
-        return S_OK;
+    struct Wait { bool done = false; HRESULT hr = E_FAIL; Pattern pattern; } wait;
+    const HRESULT started = ShowPatternWindow(instance, owner, hideTrail, verifier, retryDelay, anchorName,
+        [&wait](HRESULT hr, const Pattern& pattern) { wait.hr = hr; wait.pattern = pattern; wait.done = true; });
+    if (FAILED(started)) return started;
+    MSG msg;
+    while (!wait.done) {
+        const BOOL got = GetMessageW(&msg, nullptr, 0, 0);
+        if (got <= 0) { if (got == 0) PostQuitMessage(static_cast<int>(msg.wParam)); break; }
+        HWND dialog = g_activeWindow.load();
+        if (dialog && IsDialogMessageW(dialog, &msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
-    state.pattern.Clear();
-    if (result == IDCANCEL) return S_FALSE;
-    return E_FAIL;
+    if (wait.done && wait.hr == S_OK) { output = wait.pattern; wait.pattern.Clear(); return S_OK; }
+    wait.pattern.Clear();
+    return wait.done ? wait.hr : E_FAIL;
+}
+
+void CloseActivePatternWindow() noexcept {
+    if (HWND window = g_activeWindow.load()) PostMessageW(window, WM_CLOSE, 0, 0);
 }
 
 HRESULT DrawPattern(HINSTANCE instance, HWND owner, bool hideTrail, Pattern& output) noexcept {
