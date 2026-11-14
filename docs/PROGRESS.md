@@ -12,6 +12,11 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-14: Fix record version backwards compatibility
+- Problem: users who enrolled on record version 5 received 'Pattern unavailable' after version 6 bump.
+- Fixed: store Read() now accepts both version 5 and version 6 records.
+- Note: if an existing record was disabled by lockout or wrong attempts, user should sign in with password and run patlock_enroll.exe to reset.
+
 ### 2026-11-14: Fix UI Automation anchor lookup and LogonUI click pass-through
 - Applied fix-anchor-and-clicks.patch:
   1. Username lookup: queries all UI Automation elements matching username,
