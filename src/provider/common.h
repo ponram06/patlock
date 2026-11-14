@@ -31,7 +31,8 @@ enum SAMPLE_FIELD_ID
     SFI_CHECKBOX          = 10,
     SFI_EDIT_TEXT         = 11,
     SFI_COMBOBOX          = 12,
-    SFI_NUM_FIELDS        = 13,  // Note: if new fields are added, keep NUM_FIELDS last.  This is used as a count of the number of fields
+    SFI_SPACER            = 13,  // Invisible multi-line text: reserves the pattern grid's height in the native tile.
+    SFI_NUM_FIELDS        = 14,  // Note: if new fields are added, keep NUM_FIELDS last.  This is used as a count of the number of fields
 };
 
 // The first value indicates when the tile is displayed (selected, not selected)
@@ -64,6 +65,7 @@ static const FIELD_STATE_PAIR s_rgFieldStatePairs[] =
     { CPFS_HIDDEN,                     CPFIS_NONE    },    // SFI_CHECKBOX
     { CPFS_HIDDEN,                     CPFIS_NONE    },    // SFI_EDIT_TEXT
     { CPFS_HIDDEN,                     CPFIS_NONE    },    // SFI_COMBOBOX
+    { CPFS_DISPLAY_IN_SELECTED_TILE,   CPFIS_NONE    },    // SFI_SPACER
 };
 
 // Field descriptors for unlock and logon.
@@ -85,7 +87,15 @@ static const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR s_rgCredProvFieldDescriptors[]
     { SFI_CHECKBOX,          CPFT_CHECKBOX,      L"Checkbox"                                                   },
     { SFI_EDIT_TEXT,         CPFT_EDIT_TEXT,     L"Edit text"                                                  },
     { SFI_COMBOBOX,          CPFT_COMBOBOX,      L"Combobox"                                                   },
+    { SFI_SPACER,            CPFT_SMALL_TEXT,    L"Pattern area"                                               },
 };
+
+// Number of blank lines in SFI_SPACER. LogonUI lays "Sign-in options" out below
+// the last field, so this must be tall enough to hold the pattern block
+// (PatternLayout::Height + AnchorGap). One small-text line is roughly 20 px at
+// 100% scale. If "Sign-in options" touches the grid, raise it; if there is a
+// large empty gap under the grid, lower it.
+static const int kSpacerLines = 12;
 
 static const PWSTR s_rgComboBoxStrings[] =
 {

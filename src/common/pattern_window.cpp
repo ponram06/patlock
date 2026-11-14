@@ -8,8 +8,16 @@
 #include <algorithm>
 #include <cmath>
 #include <strsafe.h>
+#include <objbase.h>
+#include <oleauto.h>
+#include <uiautomation.h>
+#include <memory>
+#include <string>
 
 #pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "ole32.lib")
+#pragma comment(lib, "oleaut32.lib")
+#pragma comment(lib, "uiautomationcore.lib")
 
 namespace patlock {
 namespace {
@@ -104,7 +112,90 @@ struct State {
     HBRUSH background = nullptr;
     bool highContrast = false;
     double scale = 1.0;
+    RECT anchor{};          // Native username bounds in screen pixels (UI Automation).
+    bool hasAnchor = false;
 };
+
+// ── Native username anchor (UI Automation) ───────────────────────────────────
+// LogonUI draws the avatar/username/"Sign-in options" itself and exposes no
+// layout API. To sit exactly where the PIN box sits we ask UI Automation for the
+// username element. The query runs on a worker thread while this thread pumps
+// messages (UIA may need this thread to answer), with a hard timeout, and any
+// failure falls back to the old centered estimate. It never blocks LogonUI.
+struct AnchorQuery {
+    HWND root = nullptr;
+    std::wstring name;
+    RECT rect{};
+    bool found = false;
+};
+
+DWORD WINAPI AnchorThread(LPVOID param) noexcept {
+    std::unique_ptr<std::shared_ptr<AnchorQuery>> holder(static_cast<std::shared_ptr<AnchorQuery>*>(param));
+    AnchorQuery& query = **holder;
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(init)) return 0;
+    IUIAutomation* uia = nullptr;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&uia))) && uia) {
+        IUIAutomationElement* root = nullptr;
+        if (SUCCEEDED(uia->ElementFromHandle(query.root, &root)) && root) {
+            VARIANT value;
+            VariantInit(&value);
+            value.vt = VT_BSTR;
+            value.bstrVal = SysAllocString(query.name.c_str());
+            IUIAutomationCondition* condition = nullptr;
+            if (value.bstrVal && SUCCEEDED(uia->CreatePropertyCondition(UIA_NamePropertyId, value, &condition)) && condition) {
+                IUIAutomationElement* element = nullptr;
+                if (SUCCEEDED(root->FindFirst(TreeScope_Descendants, condition, &element)) && element) {
+                    RECT r{};
+                    if (SUCCEEDED(element->get_CurrentBoundingRectangle(&r)) && r.right > r.left && r.bottom > r.top) {
+                        query.rect = r;
+                        query.found = true;
+                    }
+                    element->Release();
+                }
+                condition->Release();
+            }
+            VariantClear(&value);
+            root->Release();
+        }
+        uia->Release();
+    }
+    CoUninitialize();
+    return 0;
+}
+
+bool FindUsernameAnchor(HWND owner, const wchar_t* name, RECT* out) noexcept {
+    if (!owner || !name || !*name || !out) return false;
+    try {
+        auto query = std::make_shared<AnchorQuery>();
+        query->root = GetAncestor(owner, GA_ROOT);
+        if (!query->root) query->root = owner;
+        query->name = name;
+        auto* holder = new std::shared_ptr<AnchorQuery>(query);
+        HANDLE thread = CreateThread(nullptr, 0, AnchorThread, holder, 0, nullptr);
+        if (!thread) { delete holder; return false; }
+        const ULONGLONG deadline = GetTickCount64() + 500;
+        for (;;) {
+            const ULONGLONG now = GetTickCount64();
+            if (now >= deadline) break;
+            const DWORD wait = MsgWaitForMultipleObjects(1, &thread, FALSE, static_cast<DWORD>(deadline - now), QS_ALLINPUT);
+            if (wait == WAIT_OBJECT_0) break;          // worker finished
+            if (wait != WAIT_OBJECT_0 + 1) break;      // timeout or failure
+            MSG msg;
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        const bool finished = WaitForSingleObject(thread, 0) == WAIT_OBJECT_0;
+        CloseHandle(thread); // On timeout the worker finishes alone; it owns its own shared_ptr.
+        if (!finished || !query->found) return false;
+        *out = query->rect;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
 
 Gdiplus::Color Palette(const State& state, Gdiplus::Color normal, int systemColor) noexcept {
     if (!state.highContrast) return normal;
@@ -126,8 +217,15 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
     if (state.scale < 0.5) return false; // Decline when controls cannot remain usable.
     const int w = static_cast<int>(WindowW * state.scale);
     const int h = static_cast<int>(WindowH * state.scale);
-    const int preferredX = suggested ? suggested->left : area.left + (width - w) / 2;
-    const int preferredY = suggested ? suggested->top : area.top + height / 2 + static_cast<int>(35 * state.scale);
+    int preferredX = area.left + (width - w) / 2;
+    int preferredY = area.top + height / 2 + static_cast<int>(PatternLayout::FallbackCenterOffset * state.scale);
+    if (state.hasAnchor) {
+        // Center under the native username and start just below it, exactly
+        // where LogonUI places its own PIN box.
+        preferredX = (state.anchor.left + state.anchor.right) / 2 - w / 2;
+        preferredY = state.anchor.bottom + static_cast<int>(PatternLayout::AnchorGap * state.scale);
+    }
+    if (suggested) { preferredX = suggested->left; preferredY = suggested->top; }
     const int x = (std::max)(static_cast<int>(area.left), (std::min)(preferredX, static_cast<int>(area.right) - w));
     const int y = (std::max)(static_cast<int>(area.top), (std::min)(preferredY, static_cast<int>(area.bottom) - h));
     HIGHCONTRASTW contrast{};
@@ -147,7 +245,7 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
     auto scaled = [&state](int value) { return static_cast<int>(value * state.scale); };
     if (!SetWindowPos(window, HWND_TOP, x, y, w, h, SWP_NOACTIVATE) ||
         !MoveWindow(state.status, scaled(20), scaled(PatternLayout::StatusTop), scaled(WindowW - 40), scaled(PatternLayout::StatusHeight), TRUE) ||
-        !MoveWindow(state.fallback, scaled(32), scaled(PatternLayout::FallbackTop), scaled(WindowW - 64), scaled(PatternLayout::FallbackHeight), TRUE)) return false;
+        !MoveWindow(state.fallback, 0, 0, 0, 0, FALSE)) return false; // Hidden: native "Sign-in options" replaces it.
     // Only the margin is color-key transparent. An opaque panel keeps text
     // readable and prevents LogonUI account text showing through the controls.
     if (!SetLayeredWindowAttributes(window, TransparentKey, state.highContrast ? 255 : 0,
@@ -350,8 +448,10 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         SetWindowLongPtrW(window, GWL_EXSTYLE, exStyle | WS_EX_LAYERED);
         if (!SetLayeredWindowAttributes(window, TransparentKey, 0, LWA_COLORKEY)) { EndDialog(window, -1); return TRUE; }
 
-        state->fallback = CreateWindowExW(0, L"BUTTON", L"&Other sign-in options",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW, 0, 0, 0, 0,
+        // Zero-size, invisible, not a tab stop: the native "Sign-in options" row
+        // below the grid is the fallback now. Esc still closes the dialog.
+        state->fallback = CreateWindowExW(0, L"BUTTON", L"",
+            WS_CHILD | BS_OWNERDRAW, 0, 0, 0, 0,
             window, reinterpret_cast<HMENU>(IDCANCEL), nullptr, nullptr);
         state->status = CreateWindowExW(0, L"STATIC", L"",
             WS_CHILD | WS_VISIBLE | SS_CENTER, 0, 0, 0, 0,
@@ -359,7 +459,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         if (!state->fallback || !state->status || !Configure(window, *state, GetDpiForWindow(window), nullptr)) {
             EndDialog(window, -1); return TRUE;
         }
-        SetFocus(state->fallback);
+        SetFocus(window);
         ResetStroke(window, *state);
         if (state->retryDelay) {
             if (!RefreshRetry(window, *state)) return FALSE;
@@ -372,7 +472,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
         if (!SetTimer(window, kTimerInactivity, kInactivityTimeoutMs, nullptr)) EndDialog(window, -1);
         if (!SetTimer(window, kTimerPoll, kCursorPollMs, nullptr)) EndDialog(window, -1);
-        return FALSE; // Focus was explicitly assigned to the native fallback button.
+        return FALSE; // Focus was explicitly assigned to the dialog itself.
     }
     if (!state) return FALSE;
 
@@ -822,7 +922,8 @@ HRESULT DrawPatternInteractive(
     bool hideTrail,
     const PatternVerifier& verifier,
     Pattern& output,
-    const RetryDelay& retryDelay) noexcept
+    const RetryDelay& retryDelay,
+    const wchar_t* anchorName) noexcept
 {
     output.Clear();
 
@@ -838,6 +939,7 @@ HRESULT DrawPatternInteractive(
     dialog->cy = 200;
     State state;
     state.hide = hideTrail;
+    state.hasAnchor = FindUsernameAnchor(owner, anchorName, &state.anchor);
     try { state.verifier = verifier; state.retryDelay = retryDelay; }
     catch (...) { Gdiplus::GdiplusShutdown(gdiplusToken); return E_OUTOFMEMORY; }
     const INT_PTR result = DialogBoxIndirectParamW(instance, dialog, owner, Dialog, reinterpret_cast<LPARAM>(&state));

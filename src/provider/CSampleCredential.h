@@ -122,6 +122,7 @@ public:
     CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR    _rgCredProvFieldDescriptors[SFI_NUM_FIELDS];    // An array holding the type and name of each field in the tile.
     FIELD_STATE_PAIR                        _rgFieldStatePairs[SFI_NUM_FIELDS];             // An array holding the state of each field in the tile.
     PWSTR                                   _rgFieldStrings[SFI_NUM_FIELDS];                // An array holding the string value of each field. This is different from the name of the field held in _rgCredProvFieldDescriptors.
+    PWSTR                                   _pszDisplayName = nullptr;                      // Native username text; used to anchor the pattern block under it.
     PWSTR                                   _pszUserSid;
     PWSTR                                   _pszQualifiedUserName;                          // The user name that's used to pack the authentication buffer
     ICredentialProviderCredentialEvents2*    _pCredProvCredentialEvents;                    // Used to update fields.

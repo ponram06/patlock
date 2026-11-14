@@ -13,6 +13,7 @@
 #define WIN32_NO_STATUS
 #endif
 #include <unknwn.h>
+#include <string>
 #include "CSampleCredential.h"
 #include "CSampleProvider.h"
 #include "guid.h"
@@ -53,6 +54,7 @@ CSampleCredential::~CSampleCredential()
         CoTaskMemFree(_rgFieldStrings[i]);
         CoTaskMemFree(_rgCredProvFieldDescriptors[i].pszLabel);
     }
+    CoTaskMemFree(_pszDisplayName);
     CoTaskMemFree(_pszUserSid);
     CoTaskMemFree(_pszQualifiedUserName);
     DllRelease();
@@ -122,6 +124,17 @@ HRESULT CSampleCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
     }
     if (SUCCEEDED(hr))
     {
+        // "NBSP + newline" per line so LogonUI keeps every line's height.
+        std::wstring spacer;
+        for (int i = 0; i < kSpacerLines; ++i)
+        {
+            spacer += L"\u00A0";
+            if (i + 1 < kSpacerLines) spacer += L"\n";
+        }
+        hr = SHStrDupW(spacer.c_str(), &_rgFieldStrings[SFI_SPACER]);
+    }
+    if (SUCCEEDED(hr))
+    {
         hr = pcpUser->GetStringValue(PKEY_Identity_QualifiedUserName, &_pszQualifiedUserName);
     }
     if (SUCCEEDED(hr))
@@ -146,6 +159,7 @@ HRESULT CSampleCredential::Initialize(CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
         pcpUser->GetStringValue(PKEY_Identity_DisplayName, &pszDisplayName);
         if (pszDisplayName != nullptr)
         {
+            SHStrDupW(pszDisplayName, &_pszDisplayName);
             wchar_t szString[256];
             StringCchPrintf(szString, ARRAYSIZE(szString), L"Display Name: %s", pszDisplayName);
             hr = SHStrDupW(szString, &_rgFieldStrings[SFI_DISPLAYNAME_TEXT]);
@@ -232,8 +246,9 @@ HRESULT CSampleCredential::SetSelected(_Out_ BOOL *pbAutoLogon)
         _launchTimerId = 0;
     }
     s_pActiveSelected = this;
-    // Launch pattern grid automatically 60ms after tile selection
-    _launchTimerId = SetTimer(nullptr, 0, 60, AutoLaunchTimerCallback);
+    // Launch the pattern grid after LogonUI finishes laying out / animating the
+    // selected tile, so the native username position can be read reliably.
+    _launchTimerId = SetTimer(nullptr, 0, 300, AutoLaunchTimerCallback);
     return S_OK;
 }
 
@@ -546,7 +561,8 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID) try
 
     _dialogOpen = true;
     hr = patlock::DrawPatternInteractive(HINST_THISDLL, owner, _fChecked != FALSE, verifier, _pattern,
-        [this](DWORD* seconds) { return patlock::QueryRetryAfter(_pszUserSid, seconds); });
+        [this](DWORD* seconds) { return patlock::QueryRetryAfter(_pszUserSid, seconds); },
+        _pszDisplayName);
     _dialogOpen = false;
     _pattern.Clear();
     if (!_selected) { _pattern.Clear(); decryptedPassword.Clear(); return S_OK; }

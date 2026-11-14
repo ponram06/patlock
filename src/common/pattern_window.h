@@ -27,5 +27,6 @@ HRESULT DrawPatternInteractive(
     bool hideTrail,
     const PatternVerifier& verifier,
     Pattern& output,
-    const RetryDelay& retryDelay = nullptr) noexcept;
+    const RetryDelay& retryDelay = nullptr,
+    const wchar_t* anchorName = nullptr) noexcept;
 }
