@@ -12,6 +12,18 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-14: Fix TPM KeyIdentity name mismatch between Enroll and Verify
+- Problem: 'every pattern i draw it says wrong i also resetted the pattern but still it is the same'.
+- Root cause: Commit 2441e62 introduced an ephemeral GUID appended to key name in Enroll(),
+  but never saved the GUID in the record. When Verify() attempted to unwrap the AES key via
+  tpm::UnprotectKey(), it queried the standard KeyIdentity without the GUID. This caused
+  NCryptOpenKey to return NTE_NOT_FOUND (0x80090011), causing Verify() to fail with
+  E_ACCESSDENIED and report 'Incorrect pattern' even on the 100% correct pattern.
+- Fixed: Removed ephemeral GUID from Enroll(). KeyIdentity(record, identity) already
+  incorporates the cryptographically random 12-byte nonce, guaranteeing uniqueness per generation
+  while allowing Verify() to reliably find and unprotect the key.
+- Fixed: WM_LBUTTONUP now submits valid strokes immediately even if the stroke started via hover.
+
 ### 2026-11-14: Fix record version backwards compatibility
 - Problem: users who enrolled on record version 5 received 'Pattern unavailable' after version 6 bump.
 - Fixed: store Read() now accepts both version 5 and version 6 records.

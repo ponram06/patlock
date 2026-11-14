@@ -11,7 +11,7 @@ add_library(patlock_common STATIC src/common/pattern_window.cpp src/common/crypt
 target_include_directories(patlock_common PUBLIC src/common)
 target_compile_definitions(patlock_common PUBLIC UNICODE _UNICODE NOMINMAX _WIN32_WINNT=0x0A00 WINVER=0x0A00)
 target_compile_options(patlock_common PRIVATE /W4 /sdl)
-target_link_libraries(patlock_common PUBLIC user32 gdi32 gdiplus bcrypt advapi32 ncrypt ktmw32)
+target_link_libraries(patlock_common PUBLIC user32 gdi32 gdiplus bcrypt advapi32 ncrypt ktmw32 ole32 oleaut32)
 add_executable(patlock_enroll WIN32 src/enroll/main.cpp src/enroll/enroll.manifest)
 target_link_libraries(patlock_enroll PRIVATE patlock_common credui)
 target_link_options(patlock_enroll PRIVATE /MANIFESTUAC:level='requireAdministrator')
