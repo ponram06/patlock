@@ -258,6 +258,7 @@ HRESULT CSampleCredential::SetSelected(_Out_ BOOL *pbAutoLogon)
 HRESULT CSampleCredential::SetDeselected()
 {
     _selected = false;
+    patlock::CloseActivePatternWindow();
     if (_launchTimerId) {
         KillTimer(nullptr, _launchTimerId);
         _launchTimerId = 0;

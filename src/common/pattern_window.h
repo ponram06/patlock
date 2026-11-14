@@ -21,6 +21,10 @@ HRESULT DrawPattern(HINSTANCE instance, HWND owner, bool hideTrail, Pattern& out
 // Hover to start, move without holding a button, pause to submit a valid stroke.
 // Press-drag-release remains available as an alternative.
 // Native fallback remains keyboard accessible. The grid itself is pointer input.
+// Closes the open pattern window (if any) without authenticating. Call when
+// LogonUI deselects the tile, e.g. the user picked another sign-in option.
+void CloseActivePatternWindow() noexcept;
+
 HRESULT DrawPatternInteractive(
     HINSTANCE instance,
     HWND owner,

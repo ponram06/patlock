@@ -7,11 +7,13 @@
 #include <gdiplus.h>
 #include <algorithm>
 #include <cmath>
+#include <climits>
 #include <strsafe.h>
 #include <objbase.h>
 #include <oleauto.h>
 #include <uiautomation.h>
 #include <memory>
+#include <atomic>
 #include <string>
 
 #pragma comment(lib, "gdiplus.lib")
@@ -116,6 +118,10 @@ struct State {
     bool hasAnchor = false;
 };
 
+// The currently open pattern dialog, so the provider can close it when LogonUI
+// deselects the tile (user clicked "Sign-in options" or another user).
+std::atomic<HWND> g_activeWindow{nullptr};
+
 // ── Native username anchor (UI Automation) ───────────────────────────────────
 // LogonUI draws the avatar/username/"Sign-in options" itself and exposes no
 // layout API. To sit exactly where the PIN box sits we ask UI Automation for the
@@ -144,14 +150,28 @@ DWORD WINAPI AnchorThread(LPVOID param) noexcept {
             value.bstrVal = SysAllocString(query.name.c_str());
             IUIAutomationCondition* condition = nullptr;
             if (value.bstrVal && SUCCEEDED(uia->CreatePropertyCondition(UIA_NamePropertyId, value, &condition)) && condition) {
-                IUIAutomationElement* element = nullptr;
-                if (SUCCEEDED(root->FindFirst(TreeScope_Descendants, condition, &element)) && element) {
-                    RECT r{};
-                    if (SUCCEEDED(element->get_CurrentBoundingRectangle(&r)) && r.right > r.left && r.bottom > r.top) {
-                        query.rect = r;
-                        query.found = true;
+                // Several elements can share the username as their Name (the whole
+                // tile container, the avatar group, the text). The text is the
+                // smallest one, so take that and ignore anything tall.
+                IUIAutomationElementArray* items = nullptr;
+                if (SUCCEEDED(root->FindAll(TreeScope_Descendants, condition, &items)) && items) {
+                    int count = 0;
+                    items->get_Length(&count);
+                    LONG bestArea = LONG_MAX;
+                    for (int i = 0; i < count; ++i) {
+                        IUIAutomationElement* element = nullptr;
+                        if (FAILED(items->GetElement(i, &element)) || !element) continue;
+                        BOOL offscreen = FALSE;
+                        RECT r{};
+                        element->get_CurrentIsOffscreen(&offscreen);
+                        if (!offscreen && SUCCEEDED(element->get_CurrentBoundingRectangle(&r)) &&
+                            r.right > r.left && r.bottom > r.top && (r.bottom - r.top) <= 140) {
+                            const LONG area = (r.right - r.left) * (r.bottom - r.top);
+                            if (area < bestArea) { bestArea = area; query.rect = r; query.found = true; }
+                        }
+                        element->Release();
                     }
-                    element->Release();
+                    items->Release();
                 }
                 condition->Release();
             }
@@ -189,6 +209,10 @@ bool FindUsernameAnchor(HWND owner, const wchar_t* name, RECT* out) noexcept {
         }
         const bool finished = WaitForSingleObject(thread, 0) == WAIT_OBJECT_0;
         CloseHandle(thread); // On timeout the worker finishes alone; it owns its own shared_ptr.
+        wchar_t log[160];
+        StringCchPrintfW(log, ARRAYSIZE(log), L"patlock: username anchor finished=%d found=%d rect=%ld,%ld,%ld,%ld\n",
+            finished ? 1 : 0, query->found ? 1 : 0, query->rect.left, query->rect.top, query->rect.right, query->rect.bottom);
+        OutputDebugStringW(log);
         if (!finished || !query->found) return false;
         *out = query->rect;
         return true;
@@ -442,6 +466,10 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         state = reinterpret_cast<State*>(lp);
         SetWindowLongPtrW(window, DWLP_USER, lp);
         SetWindowTextW(window, L"Patlock");
+        g_activeWindow.store(window);
+        // DialogBox disables its owner. Re-enable it: LogonUI must keep receiving
+        // clicks for "Sign-in options" and the user list while the grid is shown.
+        if (HWND owner = GetWindow(window, GW_OWNER)) EnableWindow(owner, TRUE);
 
         // Transparent layered window for floating rounded corners
         LONG_PTR exStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
@@ -473,6 +501,11 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         if (!SetTimer(window, kTimerInactivity, kInactivityTimeoutMs, nullptr)) EndDialog(window, -1);
         if (!SetTimer(window, kTimerPoll, kCursorPollMs, nullptr)) EndDialog(window, -1);
         return FALSE; // Focus was explicitly assigned to the dialog itself.
+    }
+    if (message == WM_NCDESTROY) {
+        HWND expected = window;
+        g_activeWindow.compare_exchange_strong(expected, nullptr);
+        return FALSE;
     }
     if (!state) return FALSE;
 
@@ -954,6 +987,10 @@ HRESULT DrawPatternInteractive(
     state.pattern.Clear();
     if (result == IDCANCEL) return S_FALSE;
     return E_FAIL;
+}
+
+void CloseActivePatternWindow() noexcept {
+    if (HWND window = g_activeWindow.load()) PostMessageW(window, WM_CLOSE, 0, 0);
 }
 
 HRESULT DrawPattern(HINSTANCE instance, HWND owner, bool hideTrail, Pattern& output) noexcept {

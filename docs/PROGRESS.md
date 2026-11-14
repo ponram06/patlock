@@ -12,6 +12,20 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-14: Fix UI Automation anchor lookup and LogonUI click pass-through
+- Applied fix-anchor-and-clicks.patch:
+  1. Username lookup: queries all UI Automation elements matching username,
+     filtering for on-screen elements with height <= 140px, picking the smallest area.
+  2. Owner window re-enabled in WM_INITDIALOG via EnableWindow(owner, TRUE) so
+     LogonUI continues receiving clicks for 'Sign-in options' and user switching.
+  3. CloseActivePatternWindow() added and invoked from CSampleCredential::SetDeselected()
+     so the floating grid closes whenever LogonUI deselects the tile.
+  4. Added <climits> header in pattern_window.cpp to ensure clean compilation of LONG_MAX.
+- Preserved: pattern verification, storage, crypto, and lockout logic untouched.
+- Tested by human in VM (results): pending VM build and test.
+- Not verified yet: real lock screen click pass-through and UI Automation element discovery on target Windows 11 build.
+- Next step: pull and test via update.cmd in the VM.
+
 ### 2026-11-14: Phase 7 native-hierarchy UI repair
 - Built: restored the requested native hierarchy: Windows username, then only
   the 3x3 pattern grid, then `Other sign-in options`. The normal state has no
