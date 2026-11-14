@@ -33,7 +33,6 @@ HRESULT ShowPatternWindow(
     RetryDelay retryDelay,
     const wchar_t* anchorName,
     PatternDone onDone) noexcept;
-
 // Closes the open pattern window (if any) without authenticating. Call when
 // LogonUI deselects the tile, e.g. the user picked another sign-in option.
 void CloseActivePatternWindow() noexcept;

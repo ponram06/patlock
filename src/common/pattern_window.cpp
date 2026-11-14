@@ -7,6 +7,7 @@
 #include <gdiplus.h>
 #include <algorithm>
 #include <cmath>
+#include <climits>
 #include <strsafe.h>
 #include <objbase.h>
 #include <oleauto.h>
@@ -128,7 +129,6 @@ constexpr UINT kMsgEnd = WM_APP + 1;
 void EndPattern(HWND window, INT_PTR code) noexcept {
     if (window) PostMessageW(window, kMsgEnd, static_cast<WPARAM>(code), 0);
 }
-
 // The currently open pattern dialog, so the provider can close it when LogonUI
 // deselects the tile (user clicked "Sign-in options" or another user).
 std::atomic<HWND> g_activeWindow{nullptr};

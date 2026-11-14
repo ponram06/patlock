@@ -170,7 +170,7 @@ HRESULT Read(Key& user, PCWSTR sid, Bundle& bundle) noexcept {
     Secret<BYTE, 32> mac;
     hr = Mac(bundle, mac.data());
     Record& record = bundle.record;
-    if (FAILED(hr) || !Equal(mac.data(), bundle.mac, 32) || record.magic != 0x5041544c || record.version != 6 ||
+    if (FAILED(hr) || !Equal(mac.data(), bundle.mac, 32) || record.magic != 0x5041544c || (record.version != 5 && record.version != 6) ||
         record.iterations != HashIterations || record.attempts > 10 || record.disabled > 1 ||
         record.cipherBytes < 4 || record.cipherBytes > sizeof(record.cipher) || record.cipherBytes % 2 ||
         record.tpmMode > 1 ||
