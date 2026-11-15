@@ -12,6 +12,40 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-15: Security audit fixes (record format 7)
+- Written (not built, not run; agent works on the host and does not build):
+  - Record format 7: the TPM-mode pattern verifier is bound to the TPM-wrapped AES
+    key, closing the offline pattern-guessing gap that format 6 documented. The
+    password verifier is now PBKDF2. Format 5/6 records keep their old behaviour.
+    See CURRENT_STORAGE.md.
+  - Software-only (no TPM) enrollment now needs explicit consent in patlock_enroll.
+  - Provider releases the one-shot submission reservation when a verified password
+    never reached Windows: tile deselected, window closed after success, or
+    GetSerialization failed. This prevents "Pattern unavailable" after a
+    correct pattern.
+  - `--refresh` with the unchanged enrolled password now clears disabled/pending state.
+    It also gives a clear message when the password was changed.
+  - update.ps1 no longer kills LogonUI and registers with full path plus markers like
+    install.ps1. Previously, uninstall.ps1 refused to remove an update.ps1
+    registration. Machines registered by the old update.ps1 need unregister.reg.
+  - CMake: /CETCOMPAT for the provider; /W4 /sdl /guard:cf /CETCOMPAT for the
+    elevated enrollment tool.
+- How to test in the VM (snapshot first):
+  1. Build Release x64, check for new warnings, run CTest.
+  2. TPM VM: re-enroll, unlock several times, and lock/unlock repeatedly.
+  3. Draw a wrong pattern 3 times, then the right one: unlock works and the counter resets.
+  4. Draw the correct pattern, then click "Sign-in options" before it signs in.
+     Re-select Pattern: it must still be available, not "Pattern unavailable".
+  5. Change the password, draw the pattern, and confirm Windows declines once.
+     Then `--refresh` with the new password must be refused with the "enroll again"
+     message, and re-enrollment must work.
+  6. VM without a TPM: enrollment shows the no-TPM warning. "No" saves nothing; "Yes" enrolls.
+  7. An existing format 6 record must still unlock before re-enrolling.
+  8. `update.ps1`, then `uninstall.ps1`: uninstall must succeed.
+- Not verified: everything above. Compilation, TPM behaviour for wrong-auth decrypts
+  on the target TPM, and the deselect/serialization-failure paths need VM evidence.
+- Not changed: VM guards, the "VM testing only" enrollment warning, Option A policy.
+
 ### 2026-11-14: Fix TPM KeyIdentity name mismatch between Enroll and Verify
 - Problem: 'every pattern i draw it says wrong i also resetted the pattern but still it is the same'.
 - Root cause: Commit 2441e62 introduced an ephemeral GUID appended to key name in Enroll(),

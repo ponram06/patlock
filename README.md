@@ -4,7 +4,8 @@
 It builds and runs CTest without installation, elevation, enrollment or reboot.
 See [launcher instructions](docs/ONE_CLICK_VM_TEST.md). Never run it on the host.
 
-**Current candidate: record format 6; VM re-enrollment required after upgrading.**
+**Current candidate: record format 7. Format 5/6 records still work, but re-enroll to get the
+format 7 protections (see [current storage](docs/CURRENT_STORAGE.md)).**
 This candidate has not yet been built or lock-screen tested. Follow
 [VM_ACCEPTANCE.md](docs/VM_ACCEPTANCE.md) and [release status](docs/RELEASE_STATUS.md).
 Build and run provider tests only inside the VM.
@@ -61,7 +62,7 @@ Patlock comprises four core components:
     SHA-256 and receives a separate pattern-derived authorization through its
     UTF-16 PIN property. See [TPM validation](docs/TPM_VALIDATION.md): wrong-auth
     rejection and hardware anti-hammering still require VM/hardware evidence.
-  - **Baseline Mode**: If no TPM is available (or in virtual machines without virtual TPM), Patlock generates a random 256-bit AES key and stores it in `HKLM\SOFTWARE\Patlock\<SID>\Record` protected by SYSTEM- and Administrators-only DACLs.
+  - **Baseline Mode**: If no TPM is available (or in virtual machines without virtual TPM), Patlock generates a random 256-bit AES key and stores it in `HKLM\SOFTWARE\Patlock\<SID>\Record` protected by SYSTEM- and Administrators-only DACLs. The key sits beside the ciphertext, so any administrator, or anyone reading the disk without BitLocker, can recover the password. Enrollment asks for explicit consent before using this mode.
 - **Boot Availability and Escalating Lockout (Option A)**:
   - Pattern unlock remains available across reboots, matching Windows Hello PIN convenience.
   - Brute-force attacks are constrained by durable escalating lockout (30s at 5 attempts, escalating to 1m, 5m, 15m; disabled after 10 attempts).
