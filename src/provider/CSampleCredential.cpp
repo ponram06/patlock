@@ -541,11 +541,8 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID) try
         return S_OK;
     }
     _pattern.Clear();
-    DWORD retrySeconds = 0;
-    if (!_fIsLocalUser || FAILED(patlock::QueryRetryAfter(_pszUserSid, &retrySeconds))) {
-        MessageBoxW(owner, L"Pattern unavailable. Use Password, then run Patlock password refresh or re-enroll.", L"Pattern", MB_OK | MB_ICONWARNING);
-        return S_OK;
-    }
+    // No pop-up: when the pattern is unavailable (not enrolled, disabled, stale
+    // password) the grid opens and shows a quiet status line instead.
 
     // The window is modeless: this call returns immediately and the result arrives
     // later in the completion callback below. A nested modal loop here blocks
@@ -613,7 +610,7 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID) try
     _dialogOpen = true;
     AddRef();
     hr = patlock::ShowPatternWindow(HINST_THISDLL, owner, _fChecked != FALSE, verifier,
-        [this](DWORD* seconds) { return patlock::QueryRetryAfter(_pszUserSid, seconds); },
+        [this](DWORD* seconds) { return _fIsLocalUser ? patlock::QueryRetryAfter(_pszUserSid, seconds) : E_ACCESSDENIED; },
         _pszDisplayName, finished);
     if (FAILED(hr)) {
         _dialogOpen = false;

@@ -33,7 +33,8 @@ enum TimerId : UINT_PTR {
     kTimerTooShort   = 5,    // clear 'too short' message (1000ms)
     kTimerRetry      = 6,    // wrong-pattern / lockout clear
     kTimerStart      = 7,    // hover-to-start arm delay
-    kTimerPoll       = 8     // cursor position poll (30ms)
+    kTimerPoll       = 8,    // cursor position poll (30ms)
+    kTimerAnim       = 9     // dot grow / shake / trail fade animation (16ms, only while animating)
 };
 
 // ── Timing Constants ─────────────────────────────────────────────────────────
@@ -42,6 +43,8 @@ constexpr UINT kWrongFlashMs = 800;
 constexpr UINT kTooShortFlashMs = 1000;
 constexpr UINT kInactivityTimeoutMs = 120000;
 constexpr UINT kCursorPollMs = 30;
+constexpr ULONGLONG kShakeMs = 380;   // wrong-pattern shake
+constexpr ULONGLONG kFadeMs = 240;    // trail fade-out after the finger lifts
 
 // ── Color Key for Transparent Window (non-high-contrast mode) ────────────────
 constexpr COLORREF TransparentKey = RGB(1, 1, 1);
@@ -120,6 +123,12 @@ struct State {
     ULONG_PTR gdiplusToken = 0;
     bool finished = false;
     INT_PTR resultCode = IDCANCEL;
+    // Animation state (all drawn in WM_PAINT; the 16 ms timer only runs while needed).
+    float grow[9]{};                // 0 = idle, 1 = fully "touched" per dot
+    ULONGLONG shakeStart = 0;       // wrong-pattern shake start tick (0 = off)
+    Pattern fadePattern;            // trail that is currently fading out
+    ULONGLONG fadeStart = 0;
+    bool fadeRed = false;
 };
 
 // The window is modeless: it must never run its own message loop inside LogonUI,
@@ -128,6 +137,9 @@ struct State {
 constexpr UINT kMsgEnd = WM_APP + 1;
 void EndPattern(HWND window, INT_PTR code) noexcept {
     if (window) PostMessageW(window, kMsgEnd, static_cast<WPARAM>(code), 0);
+}
+void StartAnim(HWND window) noexcept {
+    SetTimer(window, kTimerAnim, 16, nullptr); // Re-arming an existing timer is harmless.
 }
 // The currently open pattern dialog, so the provider can close it when LogonUI
 // deselects the tile (user clicked "Sign-in options" or another user).
@@ -268,7 +280,7 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
     if (!SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0)) return false;
     state.highContrast = (contrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
     HBRUSH brush = CreateSolidBrush(state.highContrast ? GetSysColor(COLOR_WINDOW) : TransparentKey);
-    HFONT font = CreateFontW(-static_cast<int>(16 * state.scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    HFONT font = CreateFontW(-static_cast<int>(15 * state.scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     if (!brush || !font) { if (brush) DeleteObject(brush); if (font) DeleteObject(font); return false; }
     SendMessageW(state.fallback, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
@@ -353,7 +365,8 @@ bool RefreshRetry(HWND window, State& state) noexcept {
         try { hr = state.retryDelay(&state.retrySeconds); }
         catch (...) { state.pattern.Clear(); EndPattern(window, -1); return false; }
         if (hr == S_OK) state.passwordRequired = false;
-        else if (hr != E_ACCESSDENIED) { state.pattern.Clear(); EndPattern(window, -1); return false; }
+        // Any other failure (not enrolled, pattern disabled, stale password) keeps
+        // passwordRequired = true: the grid stays up and shows a quiet status line.
     }
     return true;
 }
@@ -364,6 +377,12 @@ void ResetStroke(HWND window, State& state) noexcept {
     KillTimer(window, kTimerTooShort);
     KillTimer(window, kTimerRetry);
     KillTimer(window, kTimerStart);
+    if (!state.hide && state.pattern.count > 1 && state.visual != VisualState::Success) {
+        state.fadePattern = state.pattern;
+        state.fadeStart = GetTickCount64();
+        state.fadeRed = state.visual == VisualState::ErrorWrong || state.visual == VisualState::ErrorTooShort;
+        StartAnim(window);
+    }
     state.pattern.Clear();
     state.dragging = false;
     state.hoverStroke = false;
@@ -444,12 +463,16 @@ void FinishPattern(HWND window, State& state) noexcept {
         } else if (result == VerifyResult::Lockout) {
             state.visual = VisualState::ErrorLockout;
             state.pattern.Clear();
+            state.shakeStart = GetTickCount64();
+            StartAnim(window);
             if (!RefreshRetry(window, state)) return;
             UpdateStatus(window, state);
             if (!state.passwordRequired && !SetTimer(window, kTimerRetry, 1000, nullptr)) EndPattern(window, -1);
         } else {
             // Wrong pattern: flash red for 800ms, then reset stroke for instant retry
             state.visual = VisualState::ErrorWrong;
+            state.shakeStart = GetTickCount64();
+            StartAnim(window);
             UpdateStatus(window, state);
             if (!SetTimer(window, kTimerRetry, kWrongFlashMs, nullptr)) { state.pattern.Clear(); EndPattern(window, -1); }
         }
@@ -546,6 +569,26 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
     switch (message) {
     case WM_TIMER:
+        if (wp == kTimerAnim) {
+            const ULONGLONG now = GetTickCount64();
+            bool active = false;
+            for (int i = 0; i < 9; ++i) {
+                const bool visited = !state->hide && state->pattern.Contains(static_cast<BYTE>(i));
+                const bool hovered = !visited && state->hoverDot == i && state->visual == VisualState::Drawing;
+                const float target = visited ? 1.0f : (hovered ? 0.5f : 0.0f);
+                float& grow = state->grow[i];
+                grow += (target - grow) * 0.35f;
+                if (std::fabs(target - grow) < 0.01f) grow = target; else active = true;
+            }
+            if (state->shakeStart) { if (now - state->shakeStart < kShakeMs) active = true; else state->shakeStart = 0; }
+            if (state->fadeStart) {
+                if (now - state->fadeStart < kFadeMs) active = true;
+                else { state->fadeStart = 0; state->fadePattern.Clear(); }
+            }
+            if (!active) KillTimer(window, kTimerAnim);
+            InvalidateRect(window, nullptr, FALSE);
+            return TRUE;
+        }
         if (wp == kTimerPoll) {
             // Color-keyed transparent areas pass mouse messages through. Sample
             // actual cursor movement so generous hit targets still work there.
@@ -664,7 +707,8 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
     case WM_DESTROY:
         if (state->font) { DeleteObject(state->font); state->font = nullptr; }
         if (state->background) { DeleteObject(state->background); state->background = nullptr; }
-        for (UINT_PTR id = 1; id <= 8; ++id) KillTimer(window, id);
+        for (UINT_PTR id = 1; id <= 9; ++id) KillTimer(window, id);
+        state->fadePattern.Clear();
         return TRUE;
 
     case WM_ERASEBKGND:
@@ -874,6 +918,12 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             g.ScaleTransform(static_cast<float>(state->scale), static_cast<float>(state->scale));
             g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+            if (state->shakeStart) {
+                const double t = static_cast<double>(GetTickCount64() - state->shakeStart) / kShakeMs;
+                if (t >= 0.0 && t < 1.0) {
+                    g.TranslateTransform(static_cast<float>(9.0 * (1.0 - t) * std::sin(t * 6.0 * 3.141592653589793)), 0.0f);
+                }
+            }
 
             // Normal mode leaves the native account header and wallpaper visible.
             // Patlock renders only the grid and fallback action.
@@ -925,45 +975,65 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 }
             }
 
+            if (state->fadeStart && state->fadePattern.count > 1) {
+                const float t = static_cast<float>(std::min<ULONGLONG>(kFadeMs, GetTickCount64() - state->fadeStart)) / kFadeMs;
+                const float width = 3.0f * (1.0f - t);
+                if (width > 0.3f) {
+                    Gdiplus::Pen fadePen(state->fadeRed ? Gdiplus::Color(255, 255, 75, 75) : accent, width);
+                    fadePen.SetStartCap(Gdiplus::LineCapRound);
+                    fadePen.SetEndCap(Gdiplus::LineCapRound);
+                    for (size_t i = 1; i < state->fadePattern.count; ++i) {
+                        const POINT p1 = Dot(grid, state->fadePattern.dots[i - 1]);
+                        const POINT p2 = Dot(grid, state->fadePattern.dots[i]);
+                        g.DrawLine(&fadePen, p1.x, p1.y, p2.x, p2.y);
+                    }
+                }
+            }
+
             // Draw the nine dots.
+            bool animating = false;
             for (BYTE i = 0; i < 9; ++i) {
                 const POINT p = Dot(grid, i);
                 const bool visited = !state->hide && state->pattern.Contains(i);
                 const bool hovered = (!visited && state->hoverDot == i && state->visual == VisualState::Drawing);
+                const float target = visited ? 1.0f : (hovered ? 0.5f : 0.0f);
+                if (std::fabs(target - state->grow[i]) > 0.005f) animating = true;
+                const float grow = state->grow[i];
 
                 if (visited) {
                     // Connected dot: outer ring + inner core
-                    float rOut = 11.0f;
+                    const float rOut = 9.0f + 3.5f * grow;
                     Gdiplus::SolidBrush db(discBg);
                     g.FillEllipse(&db, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
                     Gdiplus::Pen rp(ringColor, 2.0f);
                     g.DrawEllipse(&rp, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
 
-                    float rIn = 4.5f;
+                    const float rIn = 3.0f + 1.5f * grow;
                     Gdiplus::SolidBrush cb(coreColor);
                     g.FillEllipse(&cb, p.x - rIn, p.y - rIn, 2.0f * rIn, 2.0f * rIn);
-                } else if (hovered) {
+                } else if (hovered || grow > 0.02f) {
                     // Hovered dot: cyan accent ring
-                    float rOut = 11.0f;
+                    const float rOut = 8.5f + 3.5f * grow;
                     Gdiplus::SolidBrush db(Palette(*state, Gdiplus::Color(255, 18, 48, 88), COLOR_WINDOW));
                     g.FillEllipse(&db, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
                     Gdiplus::Pen hp(Palette(*state, Gdiplus::Color(255, 0, 160, 255), COLOR_HIGHLIGHT), 1.75f);
                     g.DrawEllipse(&hp, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
 
-                    float rIn = 4.0f;
+                    const float rIn = 3.0f + grow;
                     Gdiplus::SolidBrush cb(Palette(*state, Gdiplus::Color(255, 210, 235, 255), COLOR_WINDOWTEXT));
                     g.FillEllipse(&cb, p.x - rIn, p.y - rIn, 2.0f * rIn, 2.0f * rIn);
                 } else {
                     // Quiet solid dots, with a fine light edge for dark wallpapers.
-                    float r = 11.0f;
-                    Gdiplus::SolidBrush dotBrush(Palette(*state, Gdiplus::Color(255, 10, 14, 20), COLOR_WINDOW));
+                    const float r = 8.5f;
+                    Gdiplus::SolidBrush dotBrush(Palette(*state, Gdiplus::Color(255, 14, 18, 28), COLOR_WINDOW));
                     g.FillEllipse(&dotBrush, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
 
-                    Gdiplus::Pen dotRim(Palette(*state, Gdiplus::Color(160, 150, 165, 185), COLOR_WINDOWTEXT), 1.0f);
+                    Gdiplus::Pen dotRim(Palette(*state, Gdiplus::Color(255, 236, 241, 248), COLOR_WINDOWTEXT), 1.5f);
                     g.DrawEllipse(&dotRim, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
 
                 }
             }
+            if (animating) StartAnim(window);
 
         }
 
