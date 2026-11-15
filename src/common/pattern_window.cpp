@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cwctype>
 #include <climits>
 #include <strsafe.h>
 #include <objbase.h>
@@ -135,6 +136,7 @@ struct State {
     bool highContrast = false;
     double scale = 1.0;
     RECT anchor{};          // Native username bounds in screen pixels (UI Automation).
+    LONG limitTop = 0;      // Top of LogonUI's "Sign-in options" (screen pixels), 0 if unknown.
     bool hasAnchor = false;
     PatternDone onDone = nullptr;
     ULONG_PTR gdiplusToken = 0;
@@ -195,6 +197,7 @@ int ContentStatusHeight(const State& state) noexcept {
 constexpr UINT kMsgEnd = WM_APP + 1;
 constexpr UINT kMsgRender = WM_APP + 2;   // Coalesced redraw; posted messages run before queued input.
 constexpr UINT kMsgAnchor = WM_APP + 3;   // Username rectangle from the async lookup.
+constexpr UINT kMsgLimit = WM_APP + 4;    // Top of the native element below the grid (0 = unknown).
 void EndPattern(HWND window, INT_PTR code) noexcept {
     if (window) PostMessageW(window, kMsgEnd, static_cast<WPARAM>(code), 0);
 }
@@ -222,7 +225,48 @@ struct AnchorQuery {
     std::wstring name;
     RECT rect{};
     bool found = false;
+    LONG limitTop = 0;       // Top of the first native element below the username (0 = none found).
 };
+
+// Finds the top of the first LogonUI element below the username in the same
+// column (normally "Sign-in options"). Matched by position, not text, so it
+// works in any display language. Tall containers and blank text are ignored.
+void FindLimitBelow(IUIAutomation* uia, IUIAutomationElement* root, AnchorQuery& query) noexcept {
+    IUIAutomationCondition* all = nullptr;
+    if (FAILED(uia->CreateTrueCondition(&all)) || !all) return;
+    IUIAutomationElementArray* items = nullptr;
+    if (SUCCEEDED(root->FindAll(TreeScope_Descendants, all, &items)) && items) {
+        const RECT& name = query.rect;
+        const LONG nameHeight = name.bottom - name.top;
+        const LONG centerX = (name.left + name.right) / 2;
+        const LONG halfColumn = (std::max)(static_cast<LONG>(name.right - name.left), 4 * nameHeight);
+        int count = 0;
+        items->get_Length(&count);
+        LONG best = LONG_MAX;
+        for (int i = 0; i < count; ++i) {
+            IUIAutomationElement* element = nullptr;
+            if (FAILED(items->GetElement(i, &element)) || !element) continue;
+            BOOL offscreen = FALSE;
+            RECT r{};
+            BSTR text = nullptr;
+            element->get_CurrentIsOffscreen(&offscreen);
+            if (!offscreen && SUCCEEDED(element->get_CurrentBoundingRectangle(&r)) &&
+                r.right > r.left && r.bottom > r.top && r.top > name.bottom + 2 &&
+                (r.bottom - r.top) <= 3 * nameHeight &&
+                std::abs((r.left + r.right) / 2 - centerX) <= halfColumn &&
+                SUCCEEDED(element->get_CurrentName(&text)) && text) {
+                bool blank = true;
+                for (const wchar_t* c = text; *c; ++c) if (!iswspace(*c)) { blank = false; break; }
+                if (!blank && r.top < best) best = r.top;
+            }
+            if (text) SysFreeString(text);
+            element->Release();
+        }
+        items->Release();
+        if (best != LONG_MAX) query.limitTop = best;
+    }
+    all->Release();
+}
 
 void QueryAnchor(AnchorQuery& query) noexcept {
     const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -263,6 +307,7 @@ void QueryAnchor(AnchorQuery& query) noexcept {
                 condition->Release();
             }
             VariantClear(&value);
+            if (query.found) FindLimitBelow(uia, root, query);
             root->Release();
         }
         uia->Release();
@@ -283,6 +328,8 @@ void RunAnchorQuery(AnchorStart* start) noexcept {
         // Pack the rectangle into the message itself so nothing leaks if the
         // window is already gone. right <= left means "not found".
         const RECT r = query.found ? query.rect : RECT{};
+        // Posted first so the anchor handler (which re-lays out) sees the new limit.
+        PostMessageW(query.notify, kMsgLimit, static_cast<WPARAM>(static_cast<ULONG>(query.found ? query.limitTop : 0)), 0);
         PostMessageW(query.notify, kMsgAnchor,
             static_cast<WPARAM>(static_cast<ULONGLONG>(static_cast<ULONG>(r.left)) | (static_cast<ULONGLONG>(static_cast<ULONG>(r.top)) << 32)),
             static_cast<LPARAM>(static_cast<ULONGLONG>(static_cast<ULONG>(r.right)) | (static_cast<ULONGLONG>(static_cast<ULONG>(r.bottom)) << 32)));
@@ -314,7 +361,7 @@ HANDLE StartAnchorQuery(const std::shared_ptr<AnchorQuery>& query) noexcept {
     }
 }
 
-bool FindUsernameAnchor(HWND owner, const wchar_t* name, RECT* out) noexcept {
+bool FindUsernameAnchor(HWND owner, const wchar_t* name, RECT* out, LONG* limitTop = nullptr) noexcept {
     if (!owner || !name || !*name || !out) return false;
     try {
         auto query = std::make_shared<AnchorQuery>();
@@ -344,6 +391,7 @@ bool FindUsernameAnchor(HWND owner, const wchar_t* name, RECT* out) noexcept {
         OutputDebugStringW(log);
         if (!finished || !query->found) return false;
         *out = query->rect;
+        if (limitTop) *limitTop = query->limitTop;
         return true;
     } catch (...) {
         return false;
@@ -388,6 +436,16 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
     const int contentHeight = ContentHeight(state);
     state.scale = (std::min)(static_cast<double>(dpi) / 96.0,
         (std::min)(static_cast<double>(width - 16) / contentWidth, static_cast<double>(height - 16) / contentHeight));
+    // LogonUI does not enlarge its layout linearly with DPI (at 175% in the VM the
+    // space it left for the tile grew only ~1.3x), so shrink the block to fit
+    // between the username and the native element below it when that is known.
+    // An implausibly small fit (a misidentified element) is ignored.
+    if (state.hasAnchor && !state.desktopCard && state.limitTop > state.anchor.bottom) {
+        const double margin = 6.0 * dpi / 96.0;
+        const double available = static_cast<double>(state.limitTop - state.anchor.bottom) - margin;
+        const double fit = available / (PatternLayout::AnchorGap + contentHeight);
+        if (fit >= 0.6 && fit < state.scale) state.scale = fit;
+    }
     if (state.scale < 0.5) return false; // Decline when controls cannot remain usable.
     const int w = static_cast<int>(contentWidth * state.scale);
     const int h = static_cast<int>(contentHeight * state.scale);
@@ -921,6 +979,14 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         Render(window, *state);
         return TRUE;
     }
+    if (message == kMsgLimit) {
+        const LONG limit = static_cast<LONG>(static_cast<ULONG>(wp));
+        if (limit != state->limitTop) {
+            state->limitTop = limit;
+            if (!state->dragging && !Configure(window, *state, GetDpiForWindow(window), nullptr)) EndPattern(window, -1);
+        }
+        return TRUE;
+    }
     if (message == kMsgAnchor) {
         state->anchorPending = false;
         const ULONGLONG a = static_cast<ULONGLONG>(wp), b = static_cast<ULONGLONG>(lp);
@@ -1354,7 +1420,7 @@ HRESULT ShowPatternWindow(
     state->desktopCard = (owner == nullptr);
     state->owner = owner;
     try { if (anchorName) state->anchorName = anchorName; } catch (...) { state->onDone = nullptr; delete state; Gdiplus::GdiplusShutdown(gdiplusToken); return E_OUTOFMEMORY; }
-    state->hasAnchor = FindUsernameAnchor(owner, anchorName, &state->anchor);
+    state->hasAnchor = FindUsernameAnchor(owner, anchorName, &state->anchor, &state->limitTop);
     if (anchorName && *anchorName && !state->hasAnchor) {
         // The username is not on screen: LogonUI is still showing the lock cover
         // (clock screen) or is mid-transition. Do not float a grid over it.
