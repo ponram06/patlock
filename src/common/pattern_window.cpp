@@ -154,6 +154,7 @@ struct State {
     bool anchorPending = false;      // An asynchronous username lookup is in flight.
     ULONGLONG anchorSince = 0;
     int anchorMisses = 0;            // Consecutive lookups that did not find the username.
+    bool escapeDown = false;         // Edge detection for Esc read by the cursor poll.
 };
 
 int ContentWidth(const State& state) noexcept {
@@ -992,6 +993,18 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             // actual cursor movement so generous hit targets still work there.
             // Stationary samples do not reset inactivity or hover deadlines.
             if (state->visual != VisualState::Drawing || !IsWindowVisible(window)) return TRUE;
+            // On the lock screen LogonUI keeps keyboard focus, so Esc never reaches
+            // this window as a message. Read the key state while a stroke is in
+            // progress and restart the stroke on a fresh press.
+            const bool escapeDown = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+            const bool escapePressed = escapeDown && !state->escapeDown;
+            state->escapeDown = escapeDown;
+            // The desktop card gets Esc as a dialog command instead (see WM_COMMAND);
+            // handling it here too could turn one press into reset-then-close.
+            if (escapePressed && !state->desktopCard && (state->dragging || state->pattern.count)) {
+                ResetStroke(window, *state);
+                return TRUE;
+            }
             POINT current{}; RECT bounds{};
             if (!GetCursorPos(&current) || !ScreenToClient(window, &current) || !GetClientRect(window, &bounds)) {
                 EndPattern(window, -1); return TRUE;
@@ -1220,6 +1233,12 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
     case WM_COMMAND:
         if (LOWORD(wp) == IDCANCEL) {
+            // Esc during a stroke restarts it (started on the wrong dot); it is not
+            // submitted, so no attempt is used. Esc with nothing drawn closes.
+            if (state->visual == VisualState::Drawing && (state->dragging || state->pattern.count)) {
+                ResetStroke(window, *state);
+                return TRUE;
+            }
             state->pattern.Clear();
             if (GetCapture() == window) ReleaseCapture();
             EndPattern(window, IDCANCEL);
