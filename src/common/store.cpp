@@ -226,6 +226,14 @@ void Audit(WORD type, DWORD id, PCWSTR text) noexcept {
     DeregisterEventSource(source);
 }
 
+HRESULT AuditEnrollmentFailure(PCWSTR sid, HRESULT hr) noexcept {
+    wchar_t text[200]{};
+    StringCchPrintfW(text, ARRAYSIZE(text), L"Pattern enrollment failed for %s (error 0x%08X).",
+        sid && *sid ? sid : L"unknown account", static_cast<unsigned>(hr));
+    Audit(EVENTLOG_ERROR_TYPE, 2011, text);
+    return hr;
+}
+
 HRESULT Check(Key& /*root*/, const Record& record) noexcept {
     const ULONGLONG now = Now();
     // Lockout is judged against the later of "now" and the last recorded time, so
@@ -284,10 +292,10 @@ HRESULT AuthenticatedIdentity(PCWSTR user, PCWSTR sid, PCWSTR password) noexcept
 } // anon namespace
 
 HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern) noexcept {
-    if (!pattern.Valid() || !supplied || wcsnlen_s(supplied, 513) >= 513) return E_INVALIDARG;
-    HRESULT hr = AuthenticatedIdentity(name, sid, supplied); if (FAILED(hr)) return hr;
-    Lock lock; if (!lock.Acquire()) return E_ACCESSDENIED;
-    Key root, user; hr = OpenUser(sid, root, user, true); if (FAILED(hr)) return hr;
+    if (!pattern.Valid() || !supplied || wcsnlen_s(supplied, 513) >= 513) return AuditEnrollmentFailure(sid, E_INVALIDARG);
+    HRESULT hr = AuthenticatedIdentity(name, sid, supplied); if (FAILED(hr)) return AuditEnrollmentFailure(sid, hr);
+    Lock lock; if (!lock.Acquire()) return AuditEnrollmentFailure(sid, E_ACCESSDENIED);
+    Key root, user; hr = OpenUser(sid, root, user, true); if (FAILED(hr)) return AuditEnrollmentFailure(sid, hr);
 
     // Retire the previous generation only after the replacement record commits.
     Bundle previous;
@@ -304,19 +312,19 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
     if (SUCCEEDED(hr)) hr = Random(bundle.record.salt, sizeof(bundle.record.salt));
     if (SUCCEEDED(hr)) hr = Random(bundle.record.nonce, sizeof(bundle.record.nonce));
     if (SUCCEEDED(hr)) hr = HashPattern(pattern, bundle.record.salt, bundle.record.hash);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) return AuditEnrollmentFailure(sid, hr);
     hr = ComputePasswordMac(bundle.key, supplied, bundle.record.passwordMac);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) return AuditEnrollmentFailure(sid, hr);
 
     // Key management: validate TPM, then try TPM-backed protection; only fall back to baseline on S_FALSE.
     Secret<BYTE, 32> aesKey;
     hr = Random(aesKey.data(), 32);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) return AuditEnrollmentFailure(sid, hr);
 
     const HRESULT probe = tpm::Probe();
     if (FAILED(probe)) {
         // TPM provider exists but hardware is unavailable/locked - abort enrollment
-        return probe;
+        return AuditEnrollmentFailure(sid, probe);
     }
 
     if (probe == S_OK) {
@@ -324,7 +332,7 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
         HRESULT validationHr = tpm::ValidateAuthorization();
         if (FAILED(validationHr)) {
             // TPM exists but authorization enforcement is broken - abort enrollment
-            return validationHr;
+            return AuditEnrollmentFailure(sid, validationHr);
         }
 
         Secret<BYTE, 32> authorization;
@@ -340,24 +348,24 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
             createdTpm = true;
         } else {
             // TPM operation failed after validation passed - abort enrollment, don't fall back
-            return tpmHr;
+            return AuditEnrollmentFailure(sid, tpmHr);
         }
     } else {
         // probe == S_FALSE: TPM definitively absent. A software key does not protect
         // the stored password from anyone who can read the registry, so refuse
         // unless an administrator explicitly allowed it (test machines only).
-        if (!SoftwareKeyAllowed()) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+        if (!SoftwareKeyAllowed()) return AuditEnrollmentFailure(sid, HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
         bundle.record.tpmMode = 0;
         SecureZeroMemory(bundle.record.tpmWrappedKey, sizeof(bundle.record.tpmWrappedKey));
         CopyMemory(aesKey.data(), bundle.key, 32);
     }
 
     hr = Random(bundle.record.boot, sizeof(bundle.record.boot));
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) return AuditEnrollmentFailure(sid, hr);
 
     Password password;
     hr = StringCchCopyW(password.data(), password.value.size(), supplied);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) return AuditEnrollmentFailure(sid, hr);
 
     bundle.record.cipherBytes = static_cast<DWORD>((wcslen(password.data()) + 1) * sizeof(wchar_t));
     hr = CipherWithKey(aesKey.data(), bundle.record, password, true);
@@ -365,7 +373,7 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
     aesKey.Clear();
     if (FAILED(hr)) {
         if (createdTpm) tpm::DeleteKey(createdIdentity);
-        return hr;
+        return AuditEnrollmentFailure(sid, hr);
     }
 
     bundle.record.passwordTime = bundle.record.lastSeen = Now();
@@ -375,9 +383,9 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
         // Record write failed - clean up the new TPM key
         if (createdTpm) {
             const HRESULT cleanup = tpm::DeleteKey(createdIdentity);
-            if (FAILED(cleanup)) return cleanup;  // Propagate cleanup failure
+            if (FAILED(cleanup)) return AuditEnrollmentFailure(sid, cleanup);  // Propagate cleanup failure
         }
-        return hr;
+        return AuditEnrollmentFailure(sid, hr);
     }
 
     {
@@ -390,8 +398,10 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
     if (retirePrevious) {
         HRESULT retireHr = tpm::DeleteKey(previousIdentity);
         if (FAILED(retireHr)) {
-            // Log the orphaned key but don't fail the enrollment
-            // TODO: Add event log entry for manual cleanup: previousIdentity
+            wchar_t text[200]{};
+            StringCchPrintfW(text, ARRAYSIZE(text), L"Old TPM key retirement failed for %s (error 0x%08X).",
+                sid, static_cast<unsigned>(retireHr));
+            Audit(EVENTLOG_WARNING_TYPE, 2012, text);
             g_lastRetireError = retireHr;
             return S_FALSE;  // Partial success: new key works, old key orphaned
         }
@@ -477,6 +487,12 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* sub
     ++bundle.record.attempts; bundle.record.lastSeen = Now();
     bundle.record.until = bundle.record.lastSeen + LockoutSeconds(bundle.record.attempts) * Second;
     hr = Save(user, bundle); if (FAILED(hr)) return hr;
+    if (const DWORD delay = LockoutSeconds(bundle.record.attempts); delay != 0) {
+        wchar_t text[200]{};
+        StringCchPrintfW(text, ARRAYSIZE(text), L"Pattern lockout for %s after attempt %lu (delay %lu seconds).",
+            sid, bundle.record.attempts, delay);
+        Audit(EVENTLOG_WARNING_TYPE, 2003, text);
+    }
 
     Secret<BYTE, 32> hash;
     hr = HashPattern(pattern, bundle.record.salt, hash.data());
