@@ -533,6 +533,13 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID) try
     HWND owner = nullptr;
     HRESULT hr = _pCredProvCredentialEvents->OnCreatingWindow(&owner);
     if (FAILED(hr) || !owner) return E_FAIL;
+    if (_pszDisplayName && !patlock::IsUsernameVisible(owner, _pszDisplayName)) {
+        // The lock cover (clock screen) is still showing, not the sign-in view.
+        // Show nothing and check again shortly; never verify or warn from here.
+        if (_launchTimerId) KillTimer(nullptr, _launchTimerId);
+        _launchTimerId = SetTimer(nullptr, 0, 600, AutoLaunchTimerCallback);
+        return S_OK;
+    }
     _pattern.Clear();
     DWORD retrySeconds = 0;
     if (!_fIsLocalUser || FAILED(patlock::QueryRetryAfter(_pszUserSid, &retrySeconds))) {
@@ -611,6 +618,12 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID) try
     if (FAILED(hr)) {
         _dialogOpen = false;
         Release();
+        if (hr == HRESULT_FROM_WIN32(ERROR_NOT_READY)) {
+            // Username vanished between the check and the window: try again.
+            if (_launchTimerId) KillTimer(nullptr, _launchTimerId);
+            _launchTimerId = SetTimer(nullptr, 0, 600, AutoLaunchTimerCallback);
+            return S_OK;
+        }
         return hr;
     }
     return S_OK;

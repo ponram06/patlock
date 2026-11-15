@@ -1011,6 +1011,14 @@ HRESULT ShowPatternWindow(
         return E_OUTOFMEMORY;
     }
     state->hasAnchor = FindUsernameAnchor(owner, anchorName, &state->anchor);
+    if (anchorName && *anchorName && !state->hasAnchor) {
+        // The username is not on screen: LogonUI is still showing the lock cover
+        // (clock screen) or is mid-transition. Do not float a grid over it.
+        state->onDone = nullptr;
+        delete state;
+        Gdiplus::GdiplusShutdown(gdiplusToken);
+        return HRESULT_FROM_WIN32(ERROR_NOT_READY);
+    }
 
     alignas(DWORD) BYTE buffer[sizeof(DLGTEMPLATE) + 3 * sizeof(WORD)]{};
     auto* dialog = reinterpret_cast<DLGTEMPLATE*>(buffer);
@@ -1060,6 +1068,11 @@ HRESULT DrawPatternInteractive(
 
 void CloseActivePatternWindow() noexcept {
     if (HWND window = g_activeWindow.load()) PostMessageW(window, WM_CLOSE, 0, 0);
+}
+
+bool IsUsernameVisible(HWND owner, const wchar_t* name) noexcept {
+    RECT rect{};
+    return FindUsernameAnchor(owner, name, &rect);
 }
 
 HRESULT DrawPattern(HINSTANCE instance, HWND owner, bool hideTrail, Pattern& output) noexcept {
