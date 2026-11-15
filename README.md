@@ -1,20 +1,66 @@
-# Patlock - Trackpad Pattern Sign-In for Windows
+# Patlock: pattern sign-in for Windows
 
-**Automated VM tests only:** double-click `RUN_VM_TEST.cmd` inside the VMware VM.
-It builds and runs CTest without installation, elevation, enrollment or reboot.
-See [launcher instructions](docs/ONE_CLICK_VM_TEST.md). Never run it on the host.
+Draw an Android-style 3x3 pattern with your trackpad or mouse to unlock Windows,
+instead of typing a password or PIN.
 
-**Current candidate: record format 7. Format 5/6 records still work, but re-enroll to get the
-format 7 protections (see [current storage](docs/CURRENT_STORAGE.md)).**
-Status (2026-11-15): builds without warnings and passes CTest in the Windows 11 VM;
-enrollment and lock-screen unlock were exercised by the maintainer in the VM. It has
-**not** been tested on real hardware, is unsigned, and has had no independent security
-review. Follow [VM_ACCEPTANCE.md](docs/VM_ACCEPTANCE.md) and
-[release status](docs/RELEASE_STATUS.md). Build and run provider tests only inside the VM.
+<p align="center">
+  <img src="docs/media/demo-unlock.gif" alt="Drawing a pattern on the Windows lock screen unlocks the PC" width="360">
+</p>
 
-Patlock is an Android-style 3x3 pattern sign-in for the Windows lock and sign-in screens, drawn with the laptop trackpad or mouse.
+> [!WARNING]
+> **Experimental.** Patlock has been built and tested only inside a Windows 11 virtual
+> machine. It has **not** been tested on real hardware, the binaries are **not code-signed**,
+> and there has been **no independent security review**. Do not install it on a PC you
+> depend on. It is a convenience sign-in, not stronger than your Windows password.
 
-Built as an official Windows **Credential Provider** (64-bit C++ DLL loaded by `LogonUI.exe`), Patlock integrates directly into the Windows logon architecture. When the user successfully draws the enrolled pattern, the provider retrieves the encrypted local account credential, packages a standard `KERB_INTERACTIVE_UNLOCK_LOGON` credential serialization, and hands it to Windows Local Security Authority (LSA) for real authentication.
+## What it does
+- Adds a **Pattern** option to the Windows lock and sign-in screens, next to Password and
+  PIN. It never removes or changes the built-in options.
+- Draw by click-and-drag, or without clicking: rest on a dot, glide through the dots and
+  pause. **Esc** restarts a stroke without using an attempt.
+- After a correct pattern, Windows itself performs the real sign-in with the stored
+  password. Patlock is a Windows **Credential Provider** (a 64-bit C++ DLL loaded by
+  `LogonUI.exe`) and hands Windows a standard `KERB_INTERACTIVE_UNLOCK_LOGON` credential.
+
+| Lock screen | Correct pattern |
+|---|---|
+| <img src="docs/media/lockscreen-175.png" alt="Pattern grid under the username" width="320"> | <img src="docs/media/accepted.png" alt="Pattern accepted in green" width="320"> |
+
+## How it protects the stored password
+- The Windows password is encrypted with AES-256-GCM. The key is wrapped by the **TPM**,
+  and only a pattern-derived authorisation unlocks it. Software-only storage is refused
+  unless an administrator explicitly allows it on a test machine.
+- 5 wrong patterns -> 30 s delay, rising to 1, 5 and 15 minutes; after 10 the pattern is
+  disabled until a full password sign-in. The counter survives reboots.
+- Secrets are wiped from memory after use, compared in constant time, and never logged.
+- Recovery: Safe Mode, a backup admin account, or a one-line **kill switch** that hides the
+  Pattern tile. See [RECOVERY.md](docs/RECOVERY.md).
+
+Details and honest limits: [SECURITY.md](docs/SECURITY.md),
+[current storage format](docs/CURRENT_STORAGE.md).
+
+## Status
+| Area | State |
+|---|---|
+| Build (VS 2022, CMake) and unit tests | ✅ no warnings, 6/6 tests pass |
+| Enrollment, unlock, lockout in a Windows 11 VM | ✅ tested by the maintainer |
+| 175% scaling, high contrast, installer/uninstaller, Safe Mode recovery | ✅ tested in the VM |
+| Real hardware, Microsoft/domain accounts, Windows 10 | ❌ not tested / not supported |
+| Code signing, independent security review | ❌ not done |
+
+Only **local** Windows accounts are supported.
+
+## Try it (in a VM only)
+Inside a Windows 11 VMware VM with Visual Studio 2022 (Desktop development with C++):
+1. Take a VM snapshot and make sure a second admin account works.
+2. Clone this repo (e.g. to `C:\patlock`) and run `update.cmd`. It builds, runs the tests,
+   and installs only if every test passes.
+3. Run `build\Release\patlock_enroll.exe`, enter a local account and its password, and
+   draw your pattern twice.
+4. Press Win+L and draw the pattern.
+
+Full guides: [VM acceptance](docs/VM_ACCEPTANCE.md), [production notes](docs/PRODUCTION.md),
+[progress log](docs/PROGRESS.md).
 
 ---
 
