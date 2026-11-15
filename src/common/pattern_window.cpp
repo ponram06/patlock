@@ -1144,6 +1144,10 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             if (!state->hoverStroke && !(wp & MK_LBUTTON)) state->hoverStroke = true;
             const size_t oldCount = state->pattern.count;
             Track(window, *state, current);
+            // All nine dots used: nothing more can be added, so submit now instead
+            // of waiting for a pause (seen in the VM: the user moved away and the
+            // complete stroke was discarded).
+            if (state->pattern.count >= 9) { FinishPattern(window, *state); return TRUE; }
             if (state->hoverStroke) {
                 const double dx = current.x - state->finishAnchor.x;
                 const double dy = current.y - state->finishAnchor.y;
