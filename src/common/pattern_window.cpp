@@ -235,11 +235,14 @@ struct AnchorQuery {
 // turn on to diagnose placement on another machine.
 constexpr bool kLayoutDiagnostics = false;
 void LayoutEvent(PCWSTR text) noexcept {
-    if constexpr (!kLayoutDiagnostics) return;
-    HANDLE source = RegisterEventSourceW(nullptr, L"Patlock");
-    if (!source) return;
-    ReportEventW(source, EVENTLOG_INFORMATION_TYPE, 0, 2100, nullptr, 1, 0, &text, nullptr);
-    DeregisterEventSource(source);
+    if constexpr (kLayoutDiagnostics) {
+        HANDLE source = RegisterEventSourceW(nullptr, L"Patlock");
+        if (!source) return;
+        ReportEventW(source, EVENTLOG_INFORMATION_TYPE, 0, 2100, nullptr, 1, 0, &text, nullptr);
+        DeregisterEventSource(source);
+    } else {
+        (void)text;
+    }
 }
 
 // Finds the top of the first LogonUI element below the username in the same
