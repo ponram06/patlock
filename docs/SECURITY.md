@@ -45,3 +45,19 @@ Hardened:
 
 ## Known flaws and mitigations
 See `PLAN.md` section 7. Keep that list updated as real tests reveal more.
+
+## Hardening policy (software keys and audit trail)
+- **TPM required by default.** A software-key (baseline) record stores its AES key beside the
+  ciphertext, so the pattern is only a gate: anyone able to read `HKLM\SOFTWARE\Patlock`
+  can decrypt the stored password. Enrollment now refuses baseline mode, and existing baseline
+  records are treated as unavailable, unless an administrator sets
+  `HKLM\SOFTWARE\Policies\Patlock\AllowSoftwareKey` (DWORD 1). Use that only on throwaway
+  test machines.
+- **Audit trail.** Enrollment, accepted and incorrect patterns, and disabling are written to the
+  Application log (source `Patlock`, event IDs 2000-2002 and 2010). Events carry only the account
+  SID and counters.
+- **Known limits (not fixed here).** The PBKDF2 verifier is stored in the record, so an
+  administrator-level reader can guess the roughly 380,000 possible patterns offline; the
+  password MAC is likewise a fast offline oracle for the Windows password. Removing the stored
+  verifier in TPM mode depends on proven TPM authorization enforcement (TPM_VALIDATION.md).
+  An independent security review is still required.

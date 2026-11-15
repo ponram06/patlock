@@ -62,6 +62,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
                 L"Enter the account's Windows password, not its Windows Hello PIN.\n"
                 L"If needed, configure a password in Windows Settings, then try again.",
                 cleanUser);
+        } else if (hr == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)) {
+            StringCchPrintfW(errorMsg, ARRAYSIZE(errorMsg),
+                L"This PC has no usable TPM, and Patlock requires a TPM-backed key by default.\n\n"
+                L"On a throwaway test machine only, an administrator can allow a software key:\n"
+                L"reg add HKLM\\SOFTWARE\\Policies\\Patlock /v AllowSoftwareKey /t REG_DWORD /d 1 /f\n\n"
+                L"A software key does not protect the stored password from anyone who can read the registry.");
         } else if (hr == E_INVALIDARG) {
             StringCchPrintfW(errorMsg, ARRAYSIZE(errorMsg),
                 L"Invalid input or mismatched pattern confirmation.\n"

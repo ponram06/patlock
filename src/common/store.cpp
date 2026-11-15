@@ -204,12 +204,34 @@ HRESULT Save(Key& user, Bundle& bundle) noexcept {
 // Set kMaxPasswordAge to 0 to disable password age expiration (e.g. 30ULL * 86400 * Second).
 constexpr ULONGLONG kMaxPasswordAge = 0;
 
+// A software-key ("baseline") record keeps its AES key next to the ciphertext, so
+// the pattern gives no cryptographic protection against anyone who can read the
+// registry. A TPM-backed key is therefore required unless an administrator opts
+// out on a throwaway test machine:
+//   reg add HKLM\SOFTWARE\Policies\Patlock /v AllowSoftwareKey /t REG_DWORD /d 1 /f
+bool SoftwareKeyAllowed() noexcept {
+    DWORD value = 0, size = sizeof(value);
+    const LSTATUS result = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Policies\\Patlock", L"AllowSoftwareKey",
+        RRF_RT_REG_DWORD | RRF_SUBKEY_WOW6464KEY, nullptr, &value, &size);
+    return result == ERROR_SUCCESS && value == 1;
+}
+
+// Security audit trail in the Application log (source "Patlock"). Text carries only
+// the account SID and counters, never the pattern, password, keys or hashes.
+void Audit(WORD type, DWORD id, PCWSTR text) noexcept {
+    HANDLE source = RegisterEventSourceW(nullptr, L"Patlock");
+    if (!source) return;
+    ReportEventW(source, type, 0, id, nullptr, 1, 0, &text, nullptr);
+    DeregisterEventSource(source);
+}
+
 HRESULT Check(Key& /*root*/, const Record& record) noexcept {
     const ULONGLONG now = Now();
     // Lockout is judged against the later of "now" and the last recorded time, so
     // tolerating small clock drift never shortens a lockout.
     const ULONGLONG effective = now > record.lastSeen ? now : record.lastSeen;
     if (record.disabled || record.attempts >= 10 || !record.passwordTime ||
+        (record.tpmMode != 1 && !SoftwareKeyAllowed()) ||
         now + kClockSkewTolerance < record.passwordTime || now + kClockSkewTolerance < record.lastSeen ||
         (kMaxPasswordAge > 0 && now - record.passwordTime >= kMaxPasswordAge) ||
         effective < record.until) {
@@ -320,7 +342,10 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
             return tpmHr;
         }
     } else {
-        // probe == S_FALSE: TPM definitively absent, baseline fallback permitted
+        // probe == S_FALSE: TPM definitively absent. A software key does not protect
+        // the stored password from anyone who can read the registry, so refuse
+        // unless an administrator explicitly allowed it (test machines only).
+        if (!SoftwareKeyAllowed()) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
         bundle.record.tpmMode = 0;
         SecureZeroMemory(bundle.record.tpmWrappedKey, sizeof(bundle.record.tpmWrappedKey));
         CopyMemory(aesKey.data(), bundle.key, 32);
@@ -352,6 +377,12 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
             if (FAILED(cleanup)) return cleanup;  // Propagate cleanup failure
         }
         return hr;
+    }
+
+    {
+        wchar_t text[160]{};
+        StringCchPrintfW(text, ARRAYSIZE(text), L"Pattern enrolled for %s (%s key).", sid, bundle.record.tpmMode == 1 ? L"TPM-backed" : L"software");
+        Audit(EVENTLOG_INFORMATION_TYPE, 2010, text);
     }
 
     // Record committed successfully - now safe to retire the old TPM key
@@ -422,7 +453,8 @@ HRESULT QueryRetryAfter(PCWSTR sid, DWORD* seconds) noexcept {
     const Record& record = bundle.record;
     const ULONGLONG now = Now();
     const ULONGLONG effective = now > record.lastSeen ? now : record.lastSeen;
-    if (record.disabled || record.attempts >= 10 || now + kClockSkewTolerance < record.lastSeen ||
+    if (record.disabled || record.attempts >= 10 || (record.tpmMode != 1 && !SoftwareKeyAllowed()) ||
+        now + kClockSkewTolerance < record.lastSeen ||
         now + kClockSkewTolerance < record.passwordTime ||
         !record.passwordTime || (kMaxPasswordAge && now - record.passwordTime >= kMaxPasswordAge)) return E_ACCESSDENIED;
     if (record.until > effective) *seconds = static_cast<DWORD>((record.until - effective + Second - 1) / Second);
@@ -446,7 +478,12 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* sub
 
     Secret<BYTE, 32> hash;
     hr = HashPattern(pattern, bundle.record.salt, hash.data());
-    if (FAILED(hr) || !Equal(hash.data(), bundle.record.hash, 32)) return E_ACCESSDENIED;
+    if (FAILED(hr) || !Equal(hash.data(), bundle.record.hash, 32)) {
+        wchar_t text[200]{};
+        StringCchPrintfW(text, ARRAYSIZE(text), L"Incorrect pattern for %s (failed attempt %lu of 10).", sid, bundle.record.attempts);
+        Audit(EVENTLOG_WARNING_TYPE, 2001, text);
+        return E_ACCESSDENIED;
+    }
 
     // Resolve the AES decryption key.
     Secret<BYTE, 32> aesKey;
@@ -464,6 +501,11 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* sub
 
     // Pattern matched successfully! Reset failure counter and lockout timer.
     bundle.record.attempts = 0; bundle.record.until = 0;
+    {
+        wchar_t text[160]{};
+        StringCchPrintfW(text, ARRAYSIZE(text), L"Pattern accepted for %s.", sid);
+        Audit(EVENTLOG_INFORMATION_TYPE, 2000, text);
+    }
 
     if (password) {
         // Generate one-shot submission token BEFORE decrypting password
@@ -518,6 +560,11 @@ HRESULT Disable(PCWSTR sid) noexcept {
     Bundle bundle; hr = Read(user, sid, bundle); if (FAILED(hr)) return hr;
     bundle.record.disabled = 1;
     SecureZeroMemory(bundle.record.submission, sizeof(bundle.record.submission)); // Permanent: never auto-expires.
+    {
+        wchar_t text[200]{};
+        StringCchPrintfW(text, ARRAYSIZE(text), L"Pattern disabled for %s (Windows declined the stored credential, or an administrator request). Full-password refresh required.", sid);
+        Audit(EVENTLOG_WARNING_TYPE, 2002, text);
+    }
     return Save(user, bundle);
 }
 
