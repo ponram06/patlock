@@ -12,6 +12,44 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-15: TPM key cleanup fix, pattern UI refresh, one-step update.cmd
+- Problem reported from the VM: re-enrolling showed "an old TPM key could not be
+  retired (error 0x80090009)". 0x80090009 is NTE_BAD_FLAGS: the Platform Crypto
+  Provider rejected NCRYPT_SILENT_FLAG on NCryptDeleteKey. The same call cleaned up the
+  self-test key, so every enrollment also left a `PatlockAuthTest_*` key behind,
+  and `--remove` could not delete the active key.
+- Written (not built, not run):
+  - Delete retries without flags on NTE_BAD_FLAGS. New `tpm::PurgeKeys` removes this
+    account's older Patlock keys and leftover self-test keys after a successful
+    enrollment.
+  - Pattern window uses per-pixel alpha (UpdateLayeredWindow) instead of a colour key:
+    soft white dots with touch halos, smooth white trail with a shadow, green/red
+    result colours, a "Draw your pattern" hint, a cleaner desktop enrollment card.
+    An alpha-1 plate under the grid gives real mouse messages there, so the trail
+    follows the pointer at input rate. Nothing outside the grid is covered.
+  - The grid re-checks the username position every 400 ms (UI Automation on a worker
+    thread that holds a module reference) and moves with it, which fixes the overlap
+    with "Sign-in options" when LogonUI re-lays out. If the username disappears, the
+    grid hides.
+  - update.cmd elevates itself and stops when `git pull` fails. update.ps1 finds
+    Visual Studio/CMake, configures `build` if missing, runs CTest, and deploys only
+    if every test passed.
+- How to test in the VM (snapshot first):
+  1. Run update.cmd from a normal (non-admin) prompt: accept UAC, build, tests pass.
+  2. Re-enroll twice: no "could not be retired" warning.
+  3. `certutil -csp "Microsoft Platform Crypto Provider" -key` lists one Patlock
+     key for the account after re-enrolling, and no PatlockAuthTest_ keys.
+  4. Lock screen: dots, trail, hint and colours look right on light and dark
+     wallpapers; drawing is smooth; wrong pattern shakes red; correct turns green.
+  5. Expand "Sign-in options" while the grid is shown: the grid moves with the
+     username and never overlaps the options row. Pick Password: grid closes.
+  6. Mouse clicks outside the grid (Sign-in options, other users, power) still work.
+  7. High-contrast mode and 150%/200% display scaling.
+  8. `patlock_enroll.exe --remove` succeeds.
+- Not verified: everything above. The NTE_BAD_FLAGS cause is inferred from the error
+  code and the code path; NCryptEnumKeys support in the Platform Crypto Provider needs
+  VM confirmation (step 3).
+
 ### 2026-11-15: Release/install documentation and guarded packaging
 - Written: `Build-Release.ps1`, guarded installer/uninstaller, SHA-256 and
   Authenticode verification, versioned DLL upgrades, Event Log source lifecycle,
