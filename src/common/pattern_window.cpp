@@ -89,6 +89,7 @@ constexpr int DesktopGridSpacing = 82;
 constexpr int DesktopGridTop = 134;
 constexpr int DesktopStatusTop = 350;
 constexpr int DesktopStatusHeight = 24;
+constexpr COLORREF DesktopCardBackground = RGB(248, 250, 252);
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -316,7 +317,7 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
     contrast.cbSize = sizeof(contrast);
     if (!SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0)) return false;
     state.highContrast = (contrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
-    HBRUSH brush = CreateSolidBrush(state.highContrast ? GetSysColor(COLOR_WINDOW) : (state.desktopCard ? RGB(32, 37, 52) : TransparentKey));
+    HBRUSH brush = CreateSolidBrush(state.highContrast ? GetSysColor(COLOR_WINDOW) : (state.desktopCard ? DesktopCardBackground : TransparentKey));
     HFONT font = CreateFontW(-static_cast<int>(15 * state.scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     if (!brush || !font) { if (brush) DeleteObject(brush); if (font) DeleteObject(font); return false; }
@@ -950,7 +951,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         }
 
         // 1) Fill outside with TransparentKey (outer margin)
-        HBRUSH keyBrush = CreateSolidBrush(state->highContrast ? GetSysColor(COLOR_WINDOW) : (state->desktopCard ? RGB(32, 37, 52) : TransparentKey));
+        HBRUSH keyBrush = CreateSolidBrush(state->highContrast ? GetSysColor(COLOR_WINDOW) : (state->desktopCard ? DesktopCardBackground : TransparentKey));
         const bool filled = keyBrush && FillRect(memDC, &physical, keyBrush);
         if (keyBrush) DeleteObject(keyBrush);
         if (!filled) {
@@ -984,21 +985,21 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             if (state->desktopCard && !state->highContrast) {
                 Gdiplus::GraphicsPath cardPath;
                 AddRoundedRect(cardPath, Gdiplus::RectF(1.0f, 1.0f, rect.right - 2.0f, rect.bottom - 2.0f), 28.0f);
-                Gdiplus::SolidBrush cardFill(Gdiplus::Color(255, 32, 37, 52));
+                Gdiplus::SolidBrush cardFill(Gdiplus::Color(255, 248, 250, 252));
                 g.FillPath(&cardFill, &cardPath);
-                Gdiplus::Pen cardBorder(Gdiplus::Color(255, 78, 90, 118), 1.5f);
+                Gdiplus::Pen cardBorder(Gdiplus::Color(255, 205, 213, 224), 1.5f);
                 g.DrawPath(&cardBorder, &cardPath);
                 Gdiplus::FontFamily family(L"Segoe UI");
-                Gdiplus::Font titleFont(&family, 13.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+                Gdiplus::Font titleFont(&family, 13.5f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
                 Gdiplus::Font detailFont(&family, 10.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
                 Gdiplus::StringFormat center;
                 center.SetAlignment(Gdiplus::StringAlignmentCenter);
                 center.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-                Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 226, 231, 243));
-                Gdiplus::SolidBrush detailBrush(Gdiplus::Color(255, 166, 178, 202));
+                Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 30, 41, 59));
+                Gdiplus::SolidBrush detailBrush(Gdiplus::Color(255, 87, 99, 117));
                 g.DrawString(L"Draw your pattern", -1, &titleFont, Gdiplus::RectF(0.0f, 30.0f, static_cast<float>(ContentWidth(*state)), 24.0f), &center, &titleBrush);
                 g.DrawString(L"Connect at least 5 dots", -1, &detailFont, Gdiplus::RectF(0.0f, 58.0f, static_cast<float>(ContentWidth(*state)), 18.0f), &center, &detailBrush);
-                Gdiplus::Pen divider(Gdiplus::Color(255, 55, 65, 87), 1.0f);
+                Gdiplus::Pen divider(Gdiplus::Color(255, 225, 230, 237), 1.0f);
                 g.DrawLine(&divider, 40.0f, 94.5f, static_cast<float>(ContentWidth(*state) - 40), 94.5f);
             }
 
@@ -1008,6 +1009,10 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             Gdiplus::Color ringColor = accent;
             Gdiplus::Color discBg(255, 12, 48, 96);
             Gdiplus::Color coreColor(255, 255, 255, 255);
+
+            if (state->desktopCard && !state->highContrast) {
+                discBg = Gdiplus::Color(255, 226, 239, 253);
+            }
 
             if (state->visual == VisualState::Success) {
                 lineColor = ringColor = Gdiplus::Color(255, 46, 213, 115);
@@ -1079,9 +1084,11 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                     Gdiplus::SolidBrush cb(coreColor);
                     g.FillEllipse(&cb, p.x - rIn, p.y - rIn, 2.0f * rIn, 2.0f * rIn);
                 } else if (hovered || grow > 0.02f) {
-                    // Hovered dot: cyan accent ring
+                    // Hovered dot: a restrained accent halo on the light card.
                     const float rOut = 8.5f + 3.5f * grow;
-                    Gdiplus::SolidBrush db(Palette(*state, Gdiplus::Color(255, 18, 48, 88), COLOR_WINDOW));
+                    const Gdiplus::Color hoverFill = state->desktopCard
+                        ? Gdiplus::Color(255, 226, 239, 253) : Gdiplus::Color(255, 18, 48, 88);
+                    Gdiplus::SolidBrush db(Palette(*state, hoverFill, COLOR_WINDOW));
                     g.FillEllipse(&db, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
                     Gdiplus::Pen hp(Palette(*state, Gdiplus::Color(255, 0, 160, 255), COLOR_HIGHLIGHT), 1.75f);
                     g.DrawEllipse(&hp, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
@@ -1090,12 +1097,17 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                     Gdiplus::SolidBrush cb(Palette(*state, Gdiplus::Color(255, 210, 235, 255), COLOR_WINDOWTEXT));
                     g.FillEllipse(&cb, p.x - rIn, p.y - rIn, 2.0f * rIn, 2.0f * rIn);
                 } else {
-                    // Quiet solid dots, with a fine light edge for dark wallpapers.
+                    // The desktop card uses calm outlined targets; lock-screen dots
+                    // retain their high-contrast dark fill for wallpaper visibility.
                     const float r = 8.5f;
-                    Gdiplus::SolidBrush dotBrush(Palette(*state, Gdiplus::Color(255, 14, 18, 28), COLOR_WINDOW));
+                    const Gdiplus::Color idleFill = state->desktopCard
+                        ? Gdiplus::Color(255, 255, 255, 255) : Gdiplus::Color(255, 14, 18, 28);
+                    const Gdiplus::Color idleRim = state->desktopCard
+                        ? Gdiplus::Color(255, 100, 116, 139) : Gdiplus::Color(255, 236, 241, 248);
+                    Gdiplus::SolidBrush dotBrush(Palette(*state, idleFill, COLOR_WINDOW));
                     g.FillEllipse(&dotBrush, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
 
-                    Gdiplus::Pen dotRim(Palette(*state, Gdiplus::Color(255, 236, 241, 248), COLOR_WINDOWTEXT), 1.5f);
+                    Gdiplus::Pen dotRim(Palette(*state, idleRim, COLOR_WINDOWTEXT), 1.5f);
                     g.DrawEllipse(&dotRim, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
 
                 }
