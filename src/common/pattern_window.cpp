@@ -7,6 +7,7 @@
 #include <gdiplus.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <climits>
 #include <strsafe.h>
 #include <objbase.h>
@@ -34,20 +35,23 @@ enum TimerId : UINT_PTR {
     kTimerRetry      = 6,    // wrong-pattern / lockout clear
     kTimerStart      = 7,    // hover-to-start arm delay
     kTimerPoll       = 8,    // cursor position poll (30ms)
-    kTimerAnim       = 9     // dot grow / shake / trail fade animation (16ms, only while animating)
+    kTimerAnim       = 9,    // dot grow / shake / trail fade animation (16ms, only while animating)
+    kTimerAnchor     = 10    // follow the native username when LogonUI re-lays out
 };
+constexpr UINT_PTR kLastTimer = kTimerAnchor;
 
 // ── Timing Constants ─────────────────────────────────────────────────────────
-constexpr UINT kSuccessFlashMs = 120;
+constexpr UINT kSuccessFlashMs = 160;
 constexpr UINT kWrongFlashMs = 800;
 constexpr UINT kTooShortFlashMs = 1000;
 constexpr UINT kInactivityTimeoutMs = 120000;
 constexpr UINT kCursorPollMs = 30;
 constexpr ULONGLONG kShakeMs = 380;   // wrong-pattern shake
-constexpr ULONGLONG kFadeMs = 240;    // trail fade-out after the finger lifts
+constexpr ULONGLONG kFadeMs = 260;    // trail fade-out after the finger lifts
+constexpr UINT kAnchorPollMs = 400;   // username position re-check
 
-// ── Color Key for Transparent Window (non-high-contrast mode) ────────────────
-constexpr COLORREF TransparentKey = RGB(1, 1, 1);
+// The window is per-pixel alpha (UpdateLayeredWindow): anti-aliased edges blend
+// with the wallpaper, and fully transparent pixels pass clicks to LogonUI.
 
 /// Returns the Windows system accent color for Windows 11 Fluent Design.
 /// Falls back to Windows 11 default blue if retrieval fails.
@@ -133,6 +137,8 @@ struct State {
     ULONG_PTR gdiplusToken = 0;
     bool finished = false;
     INT_PTR resultCode = IDCANCEL;
+    HWND owner = nullptr;
+    std::wstring anchorName;
     bool desktopCard = false;       // Enrollment on the desktop: opaque rounded card, not the see-through lock-screen overlay.
     // Animation state (all drawn in WM_PAINT; the 16 ms timer only runs while needed).
     float grow[9]{};                // 0 = idle, 1 = fully "touched" per dot
@@ -140,6 +146,11 @@ struct State {
     Pattern fadePattern;            // trail that is currently fading out
     ULONGLONG fadeStart = 0;
     bool fadeRed = false;
+    wchar_t statusText[96]{};       // Rendered by Patlock; the STATIC child carries it for accessibility.
+    bool renderPending = false;
+    bool anchorPending = false;      // An asynchronous username lookup is in flight.
+    ULONGLONG anchorSince = 0;
+    int anchorMisses = 0;            // Consecutive lookups that did not find the username.
 };
 
 int ContentWidth(const State& state) noexcept {
@@ -170,8 +181,15 @@ int ContentStatusHeight(const State& state) noexcept {
 // or LogonUI cannot process clicks on "Sign-in options" / the user list. Every
 // close request is posted here and handled on the window's own thread.
 constexpr UINT kMsgEnd = WM_APP + 1;
+constexpr UINT kMsgRender = WM_APP + 2;   // Coalesced redraw; posted messages run before queued input.
+constexpr UINT kMsgAnchor = WM_APP + 3;   // Username rectangle from the async lookup.
 void EndPattern(HWND window, INT_PTR code) noexcept {
     if (window) PostMessageW(window, kMsgEnd, static_cast<WPARAM>(code), 0);
+}
+void Render(HWND window, State& state) noexcept;
+void RequestRender(HWND window, State& state) noexcept {
+    if (state.renderPending) return;
+    state.renderPending = PostMessageW(window, kMsgRender, 0, 0) != FALSE;
 }
 void StartAnim(HWND window) noexcept {
     SetTimer(window, kTimerAnim, 16, nullptr); // Re-arming an existing timer is harmless.
@@ -188,16 +206,15 @@ std::atomic<HWND> g_activeWindow{nullptr};
 // failure falls back to the old centered estimate. It never blocks LogonUI.
 struct AnchorQuery {
     HWND root = nullptr;
+    HWND notify = nullptr;   // When set, the result is posted as kMsgAnchor.
     std::wstring name;
     RECT rect{};
     bool found = false;
 };
 
-DWORD WINAPI AnchorThread(LPVOID param) noexcept {
-    std::unique_ptr<std::shared_ptr<AnchorQuery>> holder(static_cast<std::shared_ptr<AnchorQuery>*>(param));
-    AnchorQuery& query = **holder;
+void QueryAnchor(AnchorQuery& query) noexcept {
     const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    if (FAILED(init)) return 0;
+    if (FAILED(init)) return;
     IUIAutomation* uia = nullptr;
     if (SUCCEEDED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&uia))) && uia) {
         IUIAutomationElement* root = nullptr;
@@ -239,7 +256,50 @@ DWORD WINAPI AnchorThread(LPVOID param) noexcept {
         uia->Release();
     }
     CoUninitialize();
-    return 0;
+}
+
+struct AnchorStart {
+    std::shared_ptr<AnchorQuery> query;
+    HMODULE module = nullptr;
+};
+
+void RunAnchorQuery(AnchorStart* start) noexcept {
+    std::unique_ptr<AnchorStart> holder(start);
+    AnchorQuery& query = *holder->query;
+    QueryAnchor(query);
+    if (query.notify) {
+        // Pack the rectangle into the message itself so nothing leaks if the
+        // window is already gone. right <= left means "not found".
+        const RECT r = query.found ? query.rect : RECT{};
+        PostMessageW(query.notify, kMsgAnchor,
+            static_cast<WPARAM>(static_cast<ULONGLONG>(static_cast<ULONG>(r.left)) | (static_cast<ULONGLONG>(static_cast<ULONG>(r.top)) << 32)),
+            static_cast<LPARAM>(static_cast<ULONGLONG>(static_cast<ULONG>(r.right)) | (static_cast<ULONGLONG>(static_cast<ULONG>(r.bottom)) << 32)));
+    }
+}
+
+DWORD WINAPI AnchorThread(LPVOID param) noexcept {
+    auto* start = static_cast<AnchorStart*>(param);
+    const HMODULE module = start->module;
+    RunAnchorQuery(start);
+    // The thread holds its own reference to this module, so LogonUI unloading the
+    // provider while a lookup is still running cannot pull code out from under it.
+    FreeLibraryAndExitThread(module, 0);
+}
+
+HANDLE StartAnchorQuery(const std::shared_ptr<AnchorQuery>& query) noexcept {
+    try {
+        auto start = std::make_unique<AnchorStart>();
+        start->query = query;
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                reinterpret_cast<LPCWSTR>(&AnchorThread), &start->module)) return nullptr;
+        const HMODULE module = start->module;
+        HANDLE thread = CreateThread(nullptr, 0, AnchorThread, start.get(), 0, nullptr);
+        if (!thread) { FreeLibrary(module); return nullptr; }
+        start.release(); // The thread owns it now.
+        return thread;
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 bool FindUsernameAnchor(HWND owner, const wchar_t* name, RECT* out) noexcept {
@@ -249,9 +309,8 @@ bool FindUsernameAnchor(HWND owner, const wchar_t* name, RECT* out) noexcept {
         query->root = GetAncestor(owner, GA_ROOT);
         if (!query->root) query->root = owner;
         query->name = name;
-        auto* holder = new std::shared_ptr<AnchorQuery>(query);
-        HANDLE thread = CreateThread(nullptr, 0, AnchorThread, holder, 0, nullptr);
-        if (!thread) { delete holder; return false; }
+        HANDLE thread = StartAnchorQuery(query);
+        if (!thread) return false;
         const ULONGLONG deadline = GetTickCount64() + 500;
         for (;;) {
             const ULONGLONG now = GetTickCount64();
@@ -266,7 +325,7 @@ bool FindUsernameAnchor(HWND owner, const wchar_t* name, RECT* out) noexcept {
             }
         }
         const bool finished = WaitForSingleObject(thread, 0) == WAIT_OBJECT_0;
-        CloseHandle(thread); // On timeout the worker finishes alone; it owns its own shared_ptr.
+        CloseHandle(thread); // On timeout the worker finishes alone; it shares ownership of the query.
         wchar_t log[160];
         StringCchPrintfW(log, ARRAYSIZE(log), L"patlock: username anchor finished=%d found=%d rect=%ld,%ld,%ld,%ld\n",
             finished ? 1 : 0, query->found ? 1 : 0, query->rect.left, query->rect.top, query->rect.right, query->rect.bottom);
@@ -276,6 +335,25 @@ bool FindUsernameAnchor(HWND owner, const wchar_t* name, RECT* out) noexcept {
         return true;
     } catch (...) {
         return false;
+    }
+}
+
+void BeginAnchorRefresh(HWND window, State& state, HWND owner, const wchar_t* name) noexcept {
+    if (!owner || !name || !*name) return;
+    const ULONGLONG now = GetTickCount64();
+    if (state.anchorPending && now - state.anchorSince < 3000) return;
+    try {
+        auto query = std::make_shared<AnchorQuery>();
+        query->root = GetAncestor(owner, GA_ROOT);
+        if (!query->root) query->root = owner;
+        query->notify = window;
+        query->name = name;
+        HANDLE thread = StartAnchorQuery(query);
+        if (!thread) return;
+        CloseHandle(thread);
+        state.anchorPending = true;
+        state.anchorSince = now;
+    } catch (...) {
     }
 }
 
@@ -317,7 +395,7 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
     contrast.cbSize = sizeof(contrast);
     if (!SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0)) return false;
     state.highContrast = (contrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
-    HBRUSH brush = CreateSolidBrush(state.highContrast ? GetSysColor(COLOR_WINDOW) : (state.desktopCard ? DesktopCardBackground : TransparentKey));
+    HBRUSH brush = CreateSolidBrush(state.highContrast ? GetSysColor(COLOR_WINDOW) : DesktopCardBackground);
     HFONT font = CreateFontW(-static_cast<int>(15 * state.scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     if (!brush || !font) { if (brush) DeleteObject(brush); if (font) DeleteObject(font); return false; }
@@ -331,15 +409,7 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
     if (!SetWindowPos(window, HWND_TOP, x, y, w, h, SWP_NOACTIVATE) ||
         !MoveWindow(state.status, scaled(20), scaled(ContentStatusTop(state)), scaled(contentWidth - 40), scaled(ContentStatusHeight(state)), TRUE) ||
         !MoveWindow(state.fallback, 0, 0, 0, 0, FALSE)) return false; // Hidden: native "Sign-in options" replaces it.
-    // Only the margin is color-key transparent. An opaque panel keeps text
-    // readable and prevents LogonUI account text showing through the controls.
-    const bool opaque = state.highContrast || state.desktopCard;
-    if (!SetLayeredWindowAttributes(window, TransparentKey, opaque ? 255 : 0, opaque ? LWA_ALPHA : LWA_COLORKEY)) return false;
-    if (state.desktopCard) {
-        HRGN region = CreateRoundRectRgn(0, 0, w + 1, h + 1, scaled(56), scaled(56));
-        if (region && !SetWindowRgn(window, region, TRUE)) DeleteObject(region);
-    }
-    InvalidateRect(window, nullptr, TRUE);
+    RequestRender(window, state);
     return true;
 }
 
@@ -378,7 +448,7 @@ int DotAt(HWND window, POINT pt, int threshold) noexcept {
     return -1;
 }
 
-void UpdateStatus(HWND window, const State& state) noexcept {
+void UpdateStatus(HWND window, State& state) noexcept {
     // LogonUI owns the account name. Keep Patlock's ready state visually quiet;
     // show status only when recovery guidance is needed.
     wchar_t text[96] = L"";
@@ -390,17 +460,14 @@ void UpdateStatus(HWND window, const State& state) noexcept {
         if (state.passwordRequired) StringCchCopyW(text, ARRAYSIZE(text), L"Pattern unavailable. Use Password.");
         else StringCchPrintfW(text, ARRAYSIZE(text), L"Try again in %lu seconds", state.retrySeconds);
     }
-    wchar_t old[96]{};
-    GetWindowTextW(state.status, old, ARRAYSIZE(old));
-    if (lstrcmpW(old, text) != 0) {
+    if (lstrcmpW(state.statusText, text) != 0) {
+        StringCchCopyW(state.statusText, ARRAYSIZE(state.statusText), text);
+        // A layered window does not draw child controls; the STATIC child stays
+        // as the accessible name source for screen readers.
         SetWindowTextW(state.status, text);
         NotifyWinEvent(EVENT_OBJECT_NAMECHANGE, state.status, OBJID_CLIENT, 0);
     }
-    const bool show = state.visual == VisualState::Success || state.visual == VisualState::Checking ||
-        state.visual == VisualState::ErrorTooShort || state.visual == VisualState::ErrorWrong ||
-        state.visual == VisualState::ErrorLockout;
-    ShowWindow(state.status, show ? SW_SHOWNOACTIVATE : SW_HIDE);
-    InvalidateRect(window, nullptr, FALSE);
+    RequestRender(window, state);
 }
 
 bool RefreshRetry(HWND window, State& state) noexcept {
@@ -496,8 +563,7 @@ void FinishPattern(HWND window, State& state) noexcept {
     if (state.verifier) {
         state.visual = VisualState::Checking;
         UpdateStatus(window, state);
-        UpdateWindow(state.status);
-        UpdateWindow(window);
+        Render(window, state); // Show "Checking" now: verification below blocks this thread.
         VerifyResult result = VerifyResult::Error;
         try { result = state.verifier(state.pattern); }
         catch (...) { state.pattern.Clear(); EndPattern(window, -1); return; }
@@ -538,6 +604,230 @@ void AddRoundedRect(Gdiplus::GraphicsPath& path, Gdiplus::RectF rect, float radi
     path.CloseFigure();
 }
 
+// ── Rendering (per-pixel alpha) ──────────────────────────────────────────────
+
+Gdiplus::Color WithAlpha(Gdiplus::Color color, float alpha) noexcept {
+    const float a = (std::max)(0.0f, (std::min)(1.0f, alpha));
+    return Gdiplus::Color(static_cast<BYTE>(color.GetA() * a), color.GetR(), color.GetG(), color.GetB());
+}
+
+Gdiplus::PointF DotPoint(const State& state, int dot) noexcept {
+    const float spacing = static_cast<float>(ContentGridSpacing(state));
+    const float centerX = ContentWidth(state) / 2.0f;
+    return Gdiplus::PointF(centerX + (dot % 3 - 1) * spacing, static_cast<float>(ContentGridTop(state)) + (dot / 3) * spacing);
+}
+
+void FillCircle(Gdiplus::Graphics& g, Gdiplus::Color color, Gdiplus::PointF center, float radius) noexcept {
+    if (radius <= 0.0f || color.GetA() == 0) return;
+    Gdiplus::SolidBrush brush(color);
+    g.FillEllipse(&brush, center.X - radius, center.Y - radius, 2.0f * radius, 2.0f * radius);
+}
+
+void StrokeLines(Gdiplus::Graphics& g, const Gdiplus::PointF* points, int count, Gdiplus::Color color, float width) noexcept {
+    if (count < 2 || width <= 0.0f || color.GetA() == 0) return;
+    Gdiplus::Pen pen(color, width);
+    pen.SetStartCap(Gdiplus::LineCapRound);
+    pen.SetEndCap(Gdiplus::LineCapRound);
+    pen.SetLineJoin(Gdiplus::LineJoinRound);
+    g.DrawLines(&pen, points, count);
+}
+
+// Draws the whole surface in logical (96 DPI) units. Returns true while a dot
+// is still easing toward its target size.
+bool PaintSurface(Gdiplus::Graphics& g, const State& state) noexcept {
+    const float width = static_cast<float>(ContentWidth(state));
+    const float height = static_cast<float>(ContentHeight(state));
+    const bool hc = state.highContrast;
+    const bool card = state.desktopCard && !hc;
+    const bool error = state.visual == VisualState::ErrorWrong || state.visual == VisualState::ErrorTooShort ||
+        state.visual == VisualState::ErrorLockout;
+    Gdiplus::FontFamily family(L"Segoe UI");
+    Gdiplus::StringFormat center;
+    center.SetAlignment(Gdiplus::StringAlignmentCenter);
+    center.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+
+    // ── Background ───────────────────────────────────────────────────────────
+    if (hc) {
+        Gdiplus::SolidBrush background(Palette(state, Gdiplus::Color(), COLOR_WINDOW));
+        g.FillRectangle(&background, 0.0f, 0.0f, width, height);
+        Gdiplus::Pen border(Palette(state, Gdiplus::Color(), COLOR_WINDOWTEXT), 1.0f);
+        g.DrawRectangle(&border, 0.5f, 0.5f, width - 1.0f, height - 1.0f);
+    } else if (card) {
+        const Gdiplus::RectF body(10.0f, 10.0f, width - 20.0f, height - 22.0f);
+        for (int i = 8; i >= 1; --i) { // Soft drop shadow.
+            const float spread = static_cast<float>(i);
+            Gdiplus::GraphicsPath shadow;
+            AddRoundedRect(shadow, Gdiplus::RectF(body.X - spread, body.Y - spread + 3.0f,
+                body.Width + 2.0f * spread, body.Height + 2.0f * spread), 24.0f + spread);
+            Gdiplus::SolidBrush shadowBrush(Gdiplus::Color(5, 15, 23, 42));
+            g.FillPath(&shadowBrush, &shadow);
+        }
+        Gdiplus::GraphicsPath cardPath;
+        AddRoundedRect(cardPath, body, 24.0f);
+        Gdiplus::SolidBrush cardFill(Gdiplus::Color(255, 255, 255, 255));
+        g.FillPath(&cardFill, &cardPath);
+        Gdiplus::Pen cardBorder(Gdiplus::Color(255, 226, 232, 240), 1.0f);
+        g.DrawPath(&cardBorder, &cardPath);
+        Gdiplus::Font titleFont(&family, 19.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+        Gdiplus::Font detailFont(&family, 13.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+        Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 15, 23, 42));
+        Gdiplus::SolidBrush detailBrush(Gdiplus::Color(255, 100, 116, 139));
+        wchar_t detail[64]{};
+        StringCchPrintfW(detail, ARRAYSIZE(detail), L"Connect at least %zu dots", MinimumDots);
+        g.DrawString(L"Draw your pattern", -1, &titleFont, Gdiplus::RectF(0.0f, 36.0f, width, 28.0f), &center, &titleBrush);
+        g.DrawString(detail, -1, &detailFont, Gdiplus::RectF(0.0f, 66.0f, width, 20.0f), &center, &detailBrush);
+    } else {
+        // A nearly invisible plate (alpha 1) under the grid: fully transparent
+        // pixels pass the pointer through to LogonUI, so this keeps real mouse
+        // messages flowing over the dots. Nothing outside the grid is covered.
+        const float spacing = static_cast<float>(ContentGridSpacing(state));
+        const float pad = static_cast<float>(HitRadius) + 8.0f;
+        const float top = static_cast<float>(ContentGridTop(state));
+        Gdiplus::GraphicsPath plate;
+        AddRoundedRect(plate, Gdiplus::RectF(width / 2.0f - spacing - pad, top - pad,
+            2.0f * (spacing + pad), 2.0f * (spacing + pad)), 28.0f);
+        Gdiplus::SolidBrush hitBrush(Gdiplus::Color(1, 0, 0, 0));
+        g.FillPath(&hitBrush, &plate);
+    }
+
+    // Wrong-pattern shake moves the grid and the status line together.
+    if (state.shakeStart) {
+        const double t = static_cast<double>(GetTickCount64() - state.shakeStart) / kShakeMs;
+        if (t >= 0.0 && t < 1.0) {
+            g.TranslateTransform(static_cast<float>(9.0 * (1.0 - t) * std::sin(t * 6.0 * 3.141592653589793)), 0.0f);
+        }
+    }
+
+    // ── Colours ──────────────────────────────────────────────────────────────
+    // Lock screen: white strokes read on any wallpaper (with a soft shadow).
+    // Desktop card: the Windows accent colour on white.
+    Gdiplus::Color tint = card ? GetSystemAccentColor() : Gdiplus::Color(255, 255, 255, 255);
+    if (state.visual == VisualState::Success) tint = card ? Gdiplus::Color(255, 22, 163, 74) : Gdiplus::Color(255, 120, 220, 120);
+    else if (error) tint = card ? Gdiplus::Color(255, 220, 38, 38) : Gdiplus::Color(255, 255, 112, 112);
+    if (hc) tint = Palette(state, tint, COLOR_HIGHLIGHT);
+    const Gdiplus::Color shadow = (card || hc) ? Gdiplus::Color(0, 0, 0, 0) : Gdiplus::Color(64, 0, 0, 0);
+    const float lineWidth = card ? 4.0f : 4.5f;
+
+    // ── Trail ────────────────────────────────────────────────────────────────
+    if (state.fadeStart && state.fadePattern.count > 1) {
+        const float t = static_cast<float>(std::min<ULONGLONG>(kFadeMs, GetTickCount64() - state.fadeStart)) / kFadeMs;
+        Gdiplus::PointF faded[9];
+        int count = 0;
+        for (size_t i = 0; i < state.fadePattern.count && count < 9; ++i) faded[count++] = DotPoint(state, state.fadePattern.dots[i]);
+        Gdiplus::Color fadeColor = state.fadeRed ? (card ? Gdiplus::Color(255, 220, 38, 38) : Gdiplus::Color(255, 255, 112, 112))
+                                                 : (card ? GetSystemAccentColor() : Gdiplus::Color(255, 255, 255, 255));
+        if (hc) fadeColor = Palette(state, fadeColor, COLOR_HIGHLIGHT);
+        StrokeLines(g, faded, count, WithAlpha(fadeColor, 0.85f * (1.0f - t)), lineWidth);
+    }
+    if (!state.hide && state.pattern.count) {
+        Gdiplus::PointF points[10];
+        int count = 0;
+        for (size_t i = 0; i < state.pattern.count && count < 9; ++i) points[count++] = DotPoint(state, state.pattern.dots[i]);
+        if (state.dragging && state.visual == VisualState::Drawing) {
+            points[count++] = Gdiplus::PointF(static_cast<float>(state.previous.x / state.scale),
+                static_cast<float>(state.previous.y / state.scale));
+        }
+        StrokeLines(g, points, count, shadow, lineWidth + 3.0f);
+        StrokeLines(g, points, count, WithAlpha(tint, card || hc ? 1.0f : 0.9f), lineWidth);
+    }
+
+    // ── Dots ─────────────────────────────────────────────────────────────────
+    bool animating = false;
+    for (BYTE i = 0; i < 9; ++i) {
+        const Gdiplus::PointF p = DotPoint(state, i);
+        const bool visited = !state.hide && state.pattern.Contains(i);
+        const bool hovered = !visited && state.hoverDot == i && state.visual == VisualState::Drawing;
+        const float target = visited ? 1.0f : (hovered ? 0.5f : 0.0f);
+        if (std::fabs(target - state.grow[i]) > 0.005f) animating = true;
+        const float grow = state.grow[i];
+        if (hc) {
+            FillCircle(g, visited ? Palette(state, tint, COLOR_HIGHLIGHT) : Palette(state, Gdiplus::Color(), COLOR_WINDOWTEXT),
+                p, (visited ? 9.0f : 6.0f) + 2.0f * grow);
+            continue;
+        }
+        // Soft touch target that swells when the dot is reached.
+        Gdiplus::Color halo = card ? Gdiplus::Color(255, 241, 245, 249) : Gdiplus::Color(34, 255, 255, 255);
+        if (visited) halo = WithAlpha(tint, card ? 0.16f : 0.28f);
+        else if (grow > 0.02f) halo = card ? Gdiplus::Color(255, 226, 232, 240) : Gdiplus::Color(64, 255, 255, 255);
+        FillCircle(g, halo, p, 15.0f + 9.0f * grow);
+        const float coreRadius = (visited ? 7.0f : 5.5f) + 1.5f * grow;
+        FillCircle(g, shadow, Gdiplus::PointF(p.X, p.Y + 1.0f), coreRadius + 1.5f);
+        const Gdiplus::Color core = visited ? tint
+            : (card ? Gdiplus::Color(255, 100, 116, 139) : Gdiplus::Color(240, 255, 255, 255));
+        FillCircle(g, core, p, coreRadius);
+    }
+
+    // ── Status line ──────────────────────────────────────────────────────────
+    const wchar_t* text = state.statusText;
+    bool hint = false;
+    if (!*text && !state.desktopCard && state.visual == VisualState::Drawing && !state.dragging && state.pattern.count == 0) {
+        text = L"Draw your pattern";
+        hint = true;
+    }
+    if (*text) {
+        g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
+        Gdiplus::Font font(&family, card ? 13.0f : 14.0f, hint ? Gdiplus::FontStyleRegular : Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+        const Gdiplus::RectF box(16.0f, static_cast<float>(ContentStatusTop(state)), width - 32.0f,
+            static_cast<float>(ContentStatusHeight(state)));
+        if (!card && !hc) {
+            Gdiplus::SolidBrush textShadow(Gdiplus::Color(hint ? 90 : 140, 0, 0, 0));
+            g.DrawString(text, -1, &font, Gdiplus::RectF(box.X, box.Y + 1.0f, box.Width, box.Height), &center, &textShadow);
+        }
+        Gdiplus::Color color = hc ? Palette(state, Gdiplus::Color(), COLOR_WINDOWTEXT)
+            : card ? (error ? tint : Gdiplus::Color(255, 51, 65, 85))
+            : (error ? Gdiplus::Color(255, 255, 190, 190) : Gdiplus::Color(hint ? 200 : 255, 255, 255, 255));
+        Gdiplus::SolidBrush textBrush(color);
+        g.DrawString(text, -1, &font, box, &center, &textBrush);
+    }
+    return animating;
+}
+
+// Draws into a 32-bit premultiplied DIB and hands it to UpdateLayeredWindow.
+void Render(HWND window, State& state) noexcept {
+    RECT client{};
+    if (!GetClientRect(window, &client) || client.right <= 0 || client.bottom <= 0) return;
+    const int w = client.right;
+    const int h = client.bottom;
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = w;
+    info.bmiHeader.biHeight = -h; // Top-down rows, matching the GDI+ stride below.
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    HDC screen = GetDC(nullptr);
+    HDC memory = screen ? CreateCompatibleDC(screen) : nullptr;
+    void* bits = nullptr;
+    HBITMAP dib = memory ? CreateDIBSection(screen, &info, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
+    bool ok = false;
+    bool animating = false;
+    if (dib && bits) {
+        ZeroMemory(bits, static_cast<size_t>(w) * static_cast<size_t>(h) * 4);
+        {
+            Gdiplus::Bitmap canvas(w, h, w * 4, PixelFormat32bppPARGB, static_cast<BYTE*>(bits));
+            Gdiplus::Graphics g(&canvas);
+            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+            g.ScaleTransform(static_cast<float>(state.scale), static_cast<float>(state.scale));
+            animating = PaintSurface(g, state);
+            g.Flush(Gdiplus::FlushIntentionSync);
+        }
+        const HGDIOBJ old = SelectObject(memory, dib);
+        if (old && old != HGDI_ERROR) {
+            POINT source{0, 0};
+            SIZE size{w, h};
+            BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+            ok = UpdateLayeredWindow(window, screen, nullptr, &size, memory, &source, 0, &blend, ULW_ALPHA) != FALSE;
+            SelectObject(memory, old);
+        }
+    }
+    if (dib) DeleteObject(dib);
+    if (memory) DeleteDC(memory);
+    if (screen) ReleaseDC(nullptr, screen);
+    if (!ok) { state.pattern.Clear(); EndPattern(window, -1); return; } // Fail closed: no half-drawn grid.
+    if (animating) StartAnim(window);
+}
+
 // ── Dialog Procedure ─────────────────────────────────────────────────────────
 
 INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcept {
@@ -549,10 +839,10 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         g_activeWindow.store(window);
         state->finished = false;
 
-        // Transparent layered window for floating rounded corners
+        // Per-pixel alpha layered window. SetLayeredWindowAttributes must never be
+        // called on it, or UpdateLayeredWindow stops working.
         LONG_PTR exStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
         SetWindowLongPtrW(window, GWL_EXSTYLE, exStyle | WS_EX_LAYERED);
-        if (!SetLayeredWindowAttributes(window, TransparentKey, 0, LWA_COLORKEY)) { EndPattern(window, -1); return TRUE; }
 
         // Zero-size, invisible, not a tab stop: the native "Sign-in options" row
         // below the grid is the fallback now. Esc still closes the dialog.
@@ -578,6 +868,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
         if (!SetTimer(window, kTimerInactivity, kInactivityTimeoutMs, nullptr)) EndPattern(window, -1);
         if (!SetTimer(window, kTimerPoll, kCursorPollMs, nullptr)) EndPattern(window, -1);
+        if (state->hasAnchor) SetTimer(window, kTimerAnchor, kAnchorPollMs, nullptr); // Optional: no anchor tracking if it fails.
         return FALSE; // Focus was explicitly assigned to the dialog itself.
     }
     if (message == WM_NCDESTROY) {
@@ -599,6 +890,38 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         return FALSE;
     }
     if (!state) return FALSE;
+    if (message == kMsgRender) {
+        state->renderPending = false;
+        Render(window, *state);
+        return TRUE;
+    }
+    if (message == kMsgAnchor) {
+        state->anchorPending = false;
+        const ULONGLONG a = static_cast<ULONGLONG>(wp), b = static_cast<ULONGLONG>(lp);
+        const RECT r{static_cast<LONG>(static_cast<ULONG>(a & 0xffffffffULL)), static_cast<LONG>(static_cast<ULONG>(a >> 32)),
+                     static_cast<LONG>(static_cast<ULONG>(b & 0xffffffffULL)), static_cast<LONG>(static_cast<ULONG>(b >> 32))};
+        if (r.right <= r.left || r.bottom <= r.top) {
+            // The username left the screen (back to the clock cover, or another
+            // view). Hide instead of floating a grid over unrelated UI.
+            if (++state->anchorMisses >= 2 && IsWindowVisible(window) && !state->dragging) {
+                ResetStroke(window, *state);
+                ShowWindow(window, SW_HIDE);
+            }
+            return TRUE;
+        }
+        state->anchorMisses = 0;
+        const bool moved = std::abs(r.left - state->anchor.left) > 1 || std::abs(r.top - state->anchor.top) > 1 ||
+            std::abs(r.right - state->anchor.right) > 1 || std::abs(r.bottom - state->anchor.bottom) > 1;
+        if (moved && !state->dragging) {
+            state->anchor = r;
+            if (!Configure(window, *state, GetDpiForWindow(window), nullptr)) { EndPattern(window, -1); return TRUE; }
+        }
+        if (!IsWindowVisible(window) && !state->dragging) {
+            ShowWindow(window, SW_SHOWNOACTIVATE);
+            ResetStroke(window, *state);
+        }
+        return TRUE;
+    }
     if (message == kMsgEnd) {
         if (!state->finished) {
             state->finished = true;
@@ -632,7 +955,11 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 else { state->fadeStart = 0; state->fadePattern.Clear(); }
             }
             if (!active) KillTimer(window, kTimerAnim);
-            InvalidateRect(window, nullptr, FALSE);
+            RequestRender(window, *state);
+            return TRUE;
+        }
+        if (wp == kTimerAnchor) {
+            if (!state->dragging) BeginAnchorRefresh(window, *state, state->owner, state->anchorName.c_str());
             return TRUE;
         }
         if (wp == kTimerPoll) {
@@ -753,7 +1080,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
     case WM_DESTROY:
         if (state->font) { DeleteObject(state->font); state->font = nullptr; }
         if (state->background) { DeleteObject(state->background); state->background = nullptr; }
-        for (UINT_PTR id = 1; id <= 9; ++id) KillTimer(window, id);
+        for (UINT_PTR id = 1; id <= kLastTimer; ++id) KillTimer(window, id);
         state->fadePattern.Clear();
         return TRUE;
 
@@ -927,202 +1254,12 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         EndPattern(window, IDCANCEL);
         return TRUE;
 
-    // ── GDI+ Anti-Aliased Fluent Surface Rendering ───────────────────────────
     case WM_PAINT: {
+        // UpdateLayeredWindow owns the pixels; just validate and redraw.
         PAINTSTRUCT paint{};
-        HDC hdc = BeginPaint(window, &paint);
-        RECT physical{};
-        GetClientRect(window, &physical);
-        RECT rect{0, 0, ContentWidth(*state), ContentHeight(*state)};
-
-        // Double buffer
-        HDC memDC = CreateCompatibleDC(hdc);
-        HBITMAP memBmp = CreateCompatibleBitmap(hdc, physical.right, physical.bottom);
-        if (!memDC || !memBmp) {
-            if (memBmp) DeleteObject(memBmp);
-            if (memDC) DeleteDC(memDC);
-            EndPaint(window, &paint);
-            state->pattern.Clear(); EndPattern(window, -1); return TRUE;
-        }
-        HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
-        if (!oldBmp || oldBmp == HGDI_ERROR) {
-            DeleteObject(memBmp); DeleteDC(memDC); EndPaint(window, &paint);
-            state->pattern.Clear(); EndPattern(window, -1); return TRUE;
-        }
-
-        // 1) Fill outside with TransparentKey (outer margin)
-        HBRUSH keyBrush = CreateSolidBrush(state->highContrast ? GetSysColor(COLOR_WINDOW) : (state->desktopCard ? DesktopCardBackground : TransparentKey));
-        const bool filled = keyBrush && FillRect(memDC, &physical, keyBrush);
-        if (keyBrush) DeleteObject(keyBrush);
-        if (!filled) {
-            SelectObject(memDC, oldBmp); DeleteObject(memBmp); DeleteDC(memDC); EndPaint(window, &paint);
-            state->pattern.Clear(); EndPattern(window, -1); return TRUE;
-        }
-
-        {
-            Gdiplus::Graphics g(memDC);
-            g.ScaleTransform(static_cast<float>(state->scale), static_cast<float>(state->scale));
-            g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
-            if (state->shakeStart) {
-                const double t = static_cast<double>(GetTickCount64() - state->shakeStart) / kShakeMs;
-                if (t >= 0.0 && t < 1.0) {
-                    g.TranslateTransform(static_cast<float>(9.0 * (1.0 - t) * std::sin(t * 6.0 * 3.141592653589793)), 0.0f);
-                }
-            }
-
-            // Normal mode leaves the native account header and wallpaper visible.
-            // Patlock renders only the grid and fallback action.
-            if (state->highContrast) {
-                Gdiplus::GraphicsPath cardPath;
-                AddRoundedRect(cardPath, Gdiplus::RectF(6.0f, 6.0f, rect.right - 12.0f, rect.bottom - 12.0f), 20.0f);
-                Gdiplus::SolidBrush background(Palette(*state, Gdiplus::Color(), COLOR_WINDOW));
-                g.FillPath(&background, &cardPath);
-                Gdiplus::Pen border(Palette(*state, Gdiplus::Color(), COLOR_WINDOWTEXT), 1.0f);
-                g.DrawPath(&border, &cardPath);
-            }
-
-            if (state->desktopCard && !state->highContrast) {
-                Gdiplus::GraphicsPath cardPath;
-                AddRoundedRect(cardPath, Gdiplus::RectF(1.0f, 1.0f, rect.right - 2.0f, rect.bottom - 2.0f), 28.0f);
-                Gdiplus::SolidBrush cardFill(Gdiplus::Color(255, 248, 250, 252));
-                g.FillPath(&cardFill, &cardPath);
-                Gdiplus::Pen cardBorder(Gdiplus::Color(255, 205, 213, 224), 1.5f);
-                g.DrawPath(&cardBorder, &cardPath);
-                Gdiplus::FontFamily family(L"Segoe UI");
-                Gdiplus::Font titleFont(&family, 13.5f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-                Gdiplus::Font detailFont(&family, 10.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-                Gdiplus::StringFormat center;
-                center.SetAlignment(Gdiplus::StringAlignmentCenter);
-                center.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-                Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 30, 41, 59));
-                Gdiplus::SolidBrush detailBrush(Gdiplus::Color(255, 87, 99, 117));
-                g.DrawString(L"Draw your pattern", -1, &titleFont, Gdiplus::RectF(0.0f, 30.0f, static_cast<float>(ContentWidth(*state)), 24.0f), &center, &titleBrush);
-                g.DrawString(L"Connect at least 5 dots", -1, &detailFont, Gdiplus::RectF(0.0f, 58.0f, static_cast<float>(ContentWidth(*state)), 18.0f), &center, &detailBrush);
-                Gdiplus::Pen divider(Gdiplus::Color(255, 225, 230, 237), 1.0f);
-                g.DrawLine(&divider, 40.0f, 94.5f, static_cast<float>(ContentWidth(*state) - 40), 94.5f);
-            }
-
-            // ── Colors by state ──────────────────────────────────────────────
-            const Gdiplus::Color accent = GetSystemAccentColor();
-            Gdiplus::Color lineColor = accent;
-            Gdiplus::Color ringColor = accent;
-            Gdiplus::Color discBg(255, 12, 48, 96);
-            Gdiplus::Color coreColor(255, 255, 255, 255);
-
-            if (state->desktopCard && !state->highContrast) {
-                discBg = Gdiplus::Color(255, 226, 239, 253);
-            }
-
-            if (state->visual == VisualState::Success) {
-                lineColor = ringColor = Gdiplus::Color(255, 46, 213, 115);
-                discBg = Gdiplus::Color(255, 18, 65, 40);
-            } else if (state->visual == VisualState::ErrorWrong || state->visual == VisualState::ErrorTooShort || state->visual == VisualState::ErrorLockout) {
-                lineColor = ringColor = Gdiplus::Color(255, 255, 75, 75);
-                discBg = Gdiplus::Color(255, 70, 20, 25);
-            }
-            if (state->highContrast) {
-                lineColor = ringColor = Palette(*state, lineColor, COLOR_HIGHLIGHT);
-                coreColor = Palette(*state, coreColor, COLOR_HIGHLIGHTTEXT);
-                discBg = Palette(*state, discBg, COLOR_HIGHLIGHT);
-            }
-            const int gridSpacing = ContentGridSpacing(*state);
-            const Layout grid{ContentWidth(*state) / 2 - gridSpacing, ContentGridTop(*state), gridSpacing, HitRadius};
-
-            // ── Anti-Aliased Connecting Lines with Rounded Caps ──────────────
-            Gdiplus::Pen linePen(lineColor, 3.0f);
-            linePen.SetStartCap(Gdiplus::LineCapRound);
-            linePen.SetEndCap(Gdiplus::LineCapRound);
-            linePen.SetLineJoin(Gdiplus::LineJoinRound);
-
-            if (!state->hide && state->pattern.count) {
-                for (size_t i = 1; i < state->pattern.count; ++i) {
-                    POINT p1 = Dot(grid, state->pattern.dots[i - 1]);
-                    POINT p2 = Dot(grid, state->pattern.dots[i]);
-                    g.DrawLine(&linePen, p1.x, p1.y, p2.x, p2.y);
-                }
-                if (state->dragging && state->visual == VisualState::Drawing) {
-                    POINT last = Dot(grid, state->pattern.dots[state->pattern.count - 1]);
-                    g.DrawLine(&linePen, last.x, last.y, static_cast<int>(state->previous.x / state->scale), static_cast<int>(state->previous.y / state->scale));
-                }
-            }
-
-            if (state->fadeStart && state->fadePattern.count > 1) {
-                const float t = static_cast<float>(std::min<ULONGLONG>(kFadeMs, GetTickCount64() - state->fadeStart)) / kFadeMs;
-                const float width = 3.0f * (1.0f - t);
-                if (width > 0.3f) {
-                    Gdiplus::Pen fadePen(state->fadeRed ? Gdiplus::Color(255, 255, 75, 75) : accent, width);
-                    fadePen.SetStartCap(Gdiplus::LineCapRound);
-                    fadePen.SetEndCap(Gdiplus::LineCapRound);
-                    for (size_t i = 1; i < state->fadePattern.count; ++i) {
-                        const POINT p1 = Dot(grid, state->fadePattern.dots[i - 1]);
-                        const POINT p2 = Dot(grid, state->fadePattern.dots[i]);
-                        g.DrawLine(&fadePen, p1.x, p1.y, p2.x, p2.y);
-                    }
-                }
-            }
-
-            // Draw the nine dots.
-            bool animating = false;
-            for (BYTE i = 0; i < 9; ++i) {
-                const POINT p = Dot(grid, i);
-                const bool visited = !state->hide && state->pattern.Contains(i);
-                const bool hovered = (!visited && state->hoverDot == i && state->visual == VisualState::Drawing);
-                const float target = visited ? 1.0f : (hovered ? 0.5f : 0.0f);
-                if (std::fabs(target - state->grow[i]) > 0.005f) animating = true;
-                const float grow = state->grow[i];
-
-                if (visited) {
-                    // Connected dot: outer ring + inner core
-                    const float rOut = 9.0f + 3.5f * grow;
-                    Gdiplus::SolidBrush db(discBg);
-                    g.FillEllipse(&db, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
-                    Gdiplus::Pen rp(ringColor, 2.0f);
-                    g.DrawEllipse(&rp, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
-
-                    const float rIn = 3.0f + 1.5f * grow;
-                    Gdiplus::SolidBrush cb(coreColor);
-                    g.FillEllipse(&cb, p.x - rIn, p.y - rIn, 2.0f * rIn, 2.0f * rIn);
-                } else if (hovered || grow > 0.02f) {
-                    // Hovered dot: a restrained accent halo on the light card.
-                    const float rOut = 8.5f + 3.5f * grow;
-                    const Gdiplus::Color hoverFill = state->desktopCard
-                        ? Gdiplus::Color(255, 226, 239, 253) : Gdiplus::Color(255, 18, 48, 88);
-                    Gdiplus::SolidBrush db(Palette(*state, hoverFill, COLOR_WINDOW));
-                    g.FillEllipse(&db, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
-                    Gdiplus::Pen hp(Palette(*state, Gdiplus::Color(255, 0, 160, 255), COLOR_HIGHLIGHT), 1.75f);
-                    g.DrawEllipse(&hp, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
-
-                    const float rIn = 3.0f + grow;
-                    Gdiplus::SolidBrush cb(Palette(*state, Gdiplus::Color(255, 210, 235, 255), COLOR_WINDOWTEXT));
-                    g.FillEllipse(&cb, p.x - rIn, p.y - rIn, 2.0f * rIn, 2.0f * rIn);
-                } else {
-                    // The desktop card uses calm outlined targets; lock-screen dots
-                    // retain their high-contrast dark fill for wallpaper visibility.
-                    const float r = 8.5f;
-                    const Gdiplus::Color idleFill = state->desktopCard
-                        ? Gdiplus::Color(255, 255, 255, 255) : Gdiplus::Color(255, 14, 18, 28);
-                    const Gdiplus::Color idleRim = state->desktopCard
-                        ? Gdiplus::Color(255, 100, 116, 139) : Gdiplus::Color(255, 236, 241, 248);
-                    Gdiplus::SolidBrush dotBrush(Palette(*state, idleFill, COLOR_WINDOW));
-                    g.FillEllipse(&dotBrush, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
-
-                    Gdiplus::Pen dotRim(Palette(*state, idleRim, COLOR_WINDOWTEXT), 1.5f);
-                    g.DrawEllipse(&dotRim, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
-
-                }
-            }
-            if (animating) StartAnim(window);
-
-        }
-
-        // Blit double buffer to screen
-        const BOOL copied = BitBlt(hdc, 0, 0, physical.right, physical.bottom, memDC, 0, 0, SRCCOPY);
-        SelectObject(memDC, oldBmp);
-        DeleteObject(memBmp);
-        DeleteDC(memDC);
+        BeginPaint(window, &paint);
         EndPaint(window, &paint);
-        if (!copied) { state->pattern.Clear(); EndPattern(window, -1); }
+        RequestRender(window, *state);
         return TRUE;
     }
     }
@@ -1160,6 +1297,8 @@ HRESULT ShowPatternWindow(
         return E_OUTOFMEMORY;
     }
     state->desktopCard = (owner == nullptr);
+    state->owner = owner;
+    try { if (anchorName) state->anchorName = anchorName; } catch (...) { state->onDone = nullptr; delete state; Gdiplus::GdiplusShutdown(gdiplusToken); return E_OUTOFMEMORY; }
     state->hasAnchor = FindUsernameAnchor(owner, anchorName, &state->anchor);
     if (anchorName && *anchorName && !state->hasAnchor) {
         // The username is not on screen: LogonUI is still showing the lock cover
