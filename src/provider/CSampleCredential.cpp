@@ -44,6 +44,7 @@ CSampleCredential::~CSampleCredential()
 {
     if (_launchTimerId) KillTimer(nullptr, _launchTimerId);
     if (s_pActiveSelected == this) s_pActiveSelected = nullptr;
+    _ReleaseUnusedSubmission();
     UnAdvise();
     if (_rgFieldStrings[SFI_PASSWORD])
     {
@@ -269,6 +270,7 @@ HRESULT CSampleCredential::SetDeselected()
     }
     _patternReady = false;
     _pattern.Clear();
+    _ReleaseUnusedSubmission();
     HRESULT hr = S_OK;
     if (_rgFieldStrings[SFI_PASSWORD])
     {
@@ -589,9 +591,14 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID) try
                     }
                     // Official auto-logon: CredentialsChanged makes LogonUI call GetSerialization.
                     if (_pProvider) _pProvider->TriggerAutoLogon(this);
+                } else {
+                    _ReleaseUnusedSubmission();
                 }
             } else {
                 secrets->password.Clear();
+                // A correct pattern whose password was never handed to Windows must
+                // not leave the record disabled, or the next unlock needs a refresh.
+                if (result == S_OK) patlock::FinishSubmission(_pszUserSid, secrets->token.data());
                 secrets->token.Clear();
             }
         } catch (...) {
@@ -643,6 +650,7 @@ HRESULT CSampleCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIAL
     if (!_rgFieldStrings[SFI_PASSWORD] || !_rgFieldStrings[SFI_PASSWORD][0]) {
         if (pcpsiOptionalStatusIcon) *pcpsiOptionalStatusIcon = CPSI_WARNING;
         if (ppwszOptionalStatusText) SHStrDupW(L"Pattern declined. Wait for lockout or use Password and refresh Patlock.", ppwszOptionalStatusText);
+        _ReleaseUnusedSubmission();
         return S_OK;
     }
     _awaitingResult = true;
@@ -751,12 +759,31 @@ HRESULT CSampleCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIAL
         CoTaskMemFree(pcpcs->rgbSerialization);
         ZeroMemory(pcpcs, sizeof(*pcpcs));
     }
+    if (FAILED(hr))
+    {
+        // Nothing reached Windows, so no stale password can be retried.
+        _awaitingResult = false;
+        _ReleaseUnusedSubmission();
+    }
     if (_rgFieldStrings[SFI_PASSWORD])
     {
         SecureZeroMemory(_rgFieldStrings[SFI_PASSWORD],
             (wcslen(_rgFieldStrings[SFI_PASSWORD]) + 1) * sizeof(wchar_t));
     }
     return hr;
+}
+
+// Clears the one-shot reservation for a verified password that never reached
+// Windows. Once a serialization was returned the outcome is unknown, so only
+// ReportResult may resolve it.
+void CSampleCredential::_ReleaseUnusedSubmission() noexcept
+{
+    const BYTE empty[16] = {};
+    if (!_awaitingResult && _pszUserSid && !patlock::Equal(_submission.data(), empty, 16))
+    {
+        patlock::FinishSubmission(_pszUserSid, _submission.data());
+    }
+    if (!_awaitingResult) _submission.Clear();
 }
 
 // Only Windows' result for our one-shot credential may clear the submission guard.

@@ -108,6 +108,7 @@ public:
   private:
 
     static VOID CALLBACK AutoLaunchTimerCallback(HWND, UINT, UINT_PTR, DWORD);
+    void _ReleaseUnusedSubmission() noexcept;
     UINT_PTR                                _launchTimerId = 0;
     CSampleProvider*                        _pProvider = nullptr;
     virtual ~CSampleCredential();
