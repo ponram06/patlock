@@ -536,6 +536,17 @@ void Track(HWND window, State& state, POINT to) noexcept {
     UpdateStatus(window, state);
 }
 
+// (Re)starts the pause timer that submits a hover stroke, or times out a short one.
+void ArmFinish(HWND window, State& state) noexcept {
+    KillTimer(window, kTimerFinish);
+    KillTimer(window, kTimerShort);
+    state.finishDue = state.shortDue = 0;
+    const bool valid = state.pattern.Valid();
+    const UINT delay = valid ? HoverPolicy::FinishDelayMs : HoverPolicy::ShortStrokeDelayMs;
+    (valid ? state.finishDue : state.shortDue) = GetTickCount64() + delay;
+    if (!SetTimer(window, valid ? kTimerFinish : kTimerShort, delay, nullptr)) EndPattern(window, -1);
+}
+
 void FinishPattern(HWND window, State& state) noexcept {
     if (state.visual != VisualState::Drawing) return;
     KillTimer(window, kTimerFinish);
@@ -1023,9 +1034,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             if (!GetCursorPos(&current) || !ScreenToClient(window, &current) || !GetClientRect(window, &bounds)) {
                 EndPattern(window, -1); return TRUE;
             }
-            if (!IsWindowVisible(window) || GetCapture() != window || !PtInRect(&bounds, current)) {
-                ResetStroke(window, *state); return TRUE;
-            }
+            if (!IsWindowVisible(window)) { ResetStroke(window, *state); return TRUE; }
             RECT fallback{};
             GetWindowRect(state->fallback, &fallback);
             MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&fallback), 2);
@@ -1128,13 +1137,11 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         state->hoverDot = DotAt(window, current, grid.hitRadius);
         state->gate.Observe(static_cast<int>(current.x / state->scale), static_cast<int>(current.y / state->scale));
         if (state->dragging) {
-            RECT bounds{};
-            GetClientRect(window, &bounds);
-            if (state->hoverStroke && !PtInRect(&bounds, current)) { ResetStroke(window, *state); return TRUE; }
-            if ((!state->hoverStroke && !(wp & MK_LBUTTON)) || GetCapture() != window) {
-                ResetStroke(window, *state);
-                return TRUE;
-            }
+            // Casual strokes must survive: leaving the window, a trackpad dropping
+            // the button mid-drag, or losing capture no longer cancel the stroke.
+            // Off-grid points simply hit no dot; a drag that lost its button
+            // continues as a hover stroke and is submitted by a pause.
+            if (!state->hoverStroke && !(wp & MK_LBUTTON)) state->hoverStroke = true;
             const size_t oldCount = state->pattern.count;
             Track(window, *state, current);
             if (state->hoverStroke) {
@@ -1168,16 +1175,27 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
     case WM_LBUTTONUP: {
         if (state->visual != VisualState::Drawing) return TRUE;
-        if (state->dragging && GetCapture() == window) {
+        if (state->dragging) {
             Track(window, *state, {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
-            if (!state->hoverStroke || state->pattern.Valid()) {
-                FinishPattern(window, *state);
-            }
+            // Releasing a complete pattern submits it, as on a phone. Releasing a
+            // short one is usually a trackpad finger lift: keep drawing instead of
+            // showing "too short"; a pause submits or times out the stroke.
+            if (state->pattern.Valid()) FinishPattern(window, *state);
+            else { state->hoverStroke = true; ArmFinish(window, *state); }
         }
         return TRUE;
     }
 
     case WM_CAPTURECHANGED:
+        // Another window took the pointer, or a trackpad ended its drag. Keep the
+        // stroke: the cursor poll keeps tracking it and a pause submits it.
+        // (FinishPattern/ResetStroke clear `dragging` before releasing capture.)
+        if (state->dragging && state->visual == VisualState::Drawing) {
+            state->hoverStroke = true;
+            ArmFinish(window, *state);
+        }
+        return TRUE;
+
     case WM_CANCELMODE:
         if (state->dragging) ResetStroke(window, *state);
         return TRUE;
