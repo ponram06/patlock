@@ -123,6 +123,7 @@ struct State {
     ULONG_PTR gdiplusToken = 0;
     bool finished = false;
     INT_PTR resultCode = IDCANCEL;
+    bool desktopCard = false;       // Enrollment on the desktop: opaque rounded card, not the see-through lock-screen overlay.
     // Animation state (all drawn in WM_PAINT; the 16 ms timer only runs while needed).
     float grow[9]{};                // 0 = idle, 1 = fully "touched" per dot
     ULONGLONG shakeStart = 0;       // wrong-pattern shake start tick (0 = off)
@@ -279,7 +280,7 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
     contrast.cbSize = sizeof(contrast);
     if (!SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0)) return false;
     state.highContrast = (contrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
-    HBRUSH brush = CreateSolidBrush(state.highContrast ? GetSysColor(COLOR_WINDOW) : TransparentKey);
+    HBRUSH brush = CreateSolidBrush(state.highContrast ? GetSysColor(COLOR_WINDOW) : (state.desktopCard ? RGB(32, 37, 52) : TransparentKey));
     HFONT font = CreateFontW(-static_cast<int>(15 * state.scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     if (!brush || !font) { if (brush) DeleteObject(brush); if (font) DeleteObject(font); return false; }
@@ -295,8 +296,12 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
         !MoveWindow(state.fallback, 0, 0, 0, 0, FALSE)) return false; // Hidden: native "Sign-in options" replaces it.
     // Only the margin is color-key transparent. An opaque panel keeps text
     // readable and prevents LogonUI account text showing through the controls.
-    if (!SetLayeredWindowAttributes(window, TransparentKey, state.highContrast ? 255 : 0,
-        state.highContrast ? LWA_ALPHA : LWA_COLORKEY)) return false;
+    const bool opaque = state.highContrast || state.desktopCard;
+    if (!SetLayeredWindowAttributes(window, TransparentKey, opaque ? 255 : 0, opaque ? LWA_ALPHA : LWA_COLORKEY)) return false;
+    if (state.desktopCard) {
+        HRGN region = CreateRoundRectRgn(0, 0, w + 1, h + 1, scaled(56), scaled(56));
+        if (region && !SetWindowRgn(window, region, TRUE)) DeleteObject(region);
+    }
     InvalidateRect(window, nullptr, TRUE);
     return true;
 }
@@ -905,7 +910,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         }
 
         // 1) Fill outside with TransparentKey (outer margin)
-        HBRUSH keyBrush = CreateSolidBrush(state->highContrast ? GetSysColor(COLOR_WINDOW) : TransparentKey);
+        HBRUSH keyBrush = CreateSolidBrush(state->highContrast ? GetSysColor(COLOR_WINDOW) : (state->desktopCard ? RGB(32, 37, 52) : TransparentKey));
         const bool filled = keyBrush && FillRect(memDC, &physical, keyBrush);
         if (keyBrush) DeleteObject(keyBrush);
         if (!filled) {
@@ -934,6 +939,21 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 g.FillPath(&background, &cardPath);
                 Gdiplus::Pen border(Palette(*state, Gdiplus::Color(), COLOR_WINDOWTEXT), 1.0f);
                 g.DrawPath(&border, &cardPath);
+            }
+
+            if (state->desktopCard && !state->highContrast) {
+                Gdiplus::GraphicsPath cardPath;
+                AddRoundedRect(cardPath, Gdiplus::RectF(1.0f, 1.0f, rect.right - 2.0f, rect.bottom - 2.0f), 28.0f);
+                Gdiplus::SolidBrush cardFill(Gdiplus::Color(255, 32, 37, 52));
+                g.FillPath(&cardFill, &cardPath);
+                Gdiplus::Pen cardBorder(Gdiplus::Color(255, 78, 90, 118), 1.5f);
+                g.DrawPath(&cardBorder, &cardPath);
+                Gdiplus::FontFamily family(L"Segoe UI");
+                Gdiplus::Font titleFont(&family, 13.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+                Gdiplus::StringFormat center;
+                center.SetAlignment(Gdiplus::StringAlignmentCenter);
+                Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 226, 231, 243));
+                g.DrawString(L"Draw your pattern", -1, &titleFont, Gdiplus::RectF(0.0f, 8.0f, static_cast<float>(WindowW), 20.0f), &center, &titleBrush);
             }
 
             // ── Colors by state ──────────────────────────────────────────────
@@ -1080,6 +1100,7 @@ HRESULT ShowPatternWindow(
         Gdiplus::GdiplusShutdown(gdiplusToken);
         return E_OUTOFMEMORY;
     }
+    state->desktopCard = (owner == nullptr);
     state->hasAnchor = FindUsernameAnchor(owner, anchorName, &state->anchor);
     if (anchorName && *anchorName && !state->hasAnchor) {
         // The username is not on screen: LogonUI is still showing the lock cover

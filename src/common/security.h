@@ -31,6 +31,7 @@ HRESULT QueryRetryAfter(PCWSTR sid, DWORD* seconds) noexcept;
 // Query whether the record for a SID uses TPM-backed key storage.
 // Returns S_OK if TPM mode, S_FALSE if baseline, or failure if no record.
 HRESULT QueryTpmMode(PCWSTR sid) noexcept;
+HRESULT LastRetireError() noexcept; // HRESULT of the last failed old-TPM-key retirement in Enroll.
 // Pure policy helpers, also used by VM tests. Seconds and failure counts only.
 DWORD LockoutSeconds(DWORD attempts) noexcept;
 }

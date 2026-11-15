@@ -8,6 +8,7 @@
 
 namespace patlock {
 namespace {
+HRESULT g_lastRetireError = S_OK;
 constexpr PCWSTR RootPath = L"SOFTWARE\\Patlock";
 constexpr PCWSTR Access = L"D:P(A;;KA;;;SY)(A;;KA;;;BA)";
 constexpr ULONGLONG Second = 10000000ULL;
@@ -391,6 +392,7 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
         if (FAILED(retireHr)) {
             // Log the orphaned key but don't fail the enrollment
             // TODO: Add event log entry for manual cleanup: previousIdentity
+            g_lastRetireError = retireHr;
             return S_FALSE;  // Partial success: new key works, old key orphaned
         }
     }
@@ -567,6 +569,8 @@ HRESULT Disable(PCWSTR sid) noexcept {
     }
     return Save(user, bundle);
 }
+
+HRESULT LastRetireError() noexcept { return g_lastRetireError; }
 
 HRESULT QueryTpmMode(PCWSTR sid) noexcept {
     Lock lock; if (!lock.Acquire()) return E_ACCESSDENIED;

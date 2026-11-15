@@ -53,7 +53,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
             ? L"Enrolled with a TPM-backed key (experimental; protection requires validation).\nPattern unlock is active and persists across reboots."
             : L"Enrolled successfully in baseline mode (software store).\nPattern unlock is active and persists across reboots.";
         MessageBoxW(nullptr, modeMsg, L"Patlock", MB_OK | MB_ICONINFORMATION);
-        if (hr == S_FALSE) MessageBoxW(nullptr, L"The new enrollment was saved, but an old TPM key could not be retired.\nThe active credential is usable; see the recovery notes for cleanup.", L"Patlock cleanup", MB_OK | MB_ICONWARNING);
+        if (hr == S_FALSE) {
+            wchar_t warn[320];
+            StringCchPrintfW(warn, ARRAYSIZE(warn), L"The new enrollment was saved, but an old TPM key could not be retired (error 0x%08X).\nThe active credential is usable; see the recovery notes for cleanup.", static_cast<unsigned>(patlock::LastRetireError()));
+            MessageBoxW(nullptr, warn, L"Patlock cleanup", MB_OK | MB_ICONWARNING);
+        }
     } else {
         wchar_t errorMsg[512];
         if (hr == HRESULT_FROM_WIN32(ERROR_LOGON_FAILURE)) {
