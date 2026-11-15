@@ -755,6 +755,15 @@ HRESULT CSampleCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIAL
             }
         }
     }
+    if (SUCCEEDED(hr) && *pcpgsr == CPGSR_RETURN_CREDENTIAL_FINISHED && _fIsLocalUser)
+    {
+        // Hand-off to Windows is done. LogonUI exits on success and does not
+        // reliably call ReportResult first, so waiting for it left the record
+        // disabled after every successful unlock ("Pattern unavailable" next
+        // time). Clear the one-shot guard now; a failure report still calls
+        // Disable() in ReportResult, so a rejected credential stays blocked.
+        patlock::FinishSubmission(_pszUserSid, _submission.data());
+    }
     if (FAILED(hr) && pcpcs->rgbSerialization)
     {
         SecureZeroMemory(pcpcs->rgbSerialization, pcpcs->cbSerialization);

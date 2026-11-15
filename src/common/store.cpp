@@ -11,6 +11,13 @@ namespace {
 constexpr PCWSTR RootPath = L"SOFTWARE\\Patlock";
 constexpr PCWSTR Access = L"D:P(A;;KA;;;SY)(A;;KA;;;BA)";
 constexpr ULONGLONG Second = 10000000ULL;
+// Wall-clock drift tolerated before the pattern is refused. VM time sync, NTP and
+// snapshot restores move the clock backwards by seconds or minutes; without a
+// tolerance the "clock went backwards" guard bricked the pattern until refresh.
+constexpr ULONGLONG kClockSkewTolerance = 10ULL * 60 * Second;
+// A verified submission that never reached Windows (tile deselected, LogonUI
+// restarted, crash) expires after this long instead of blocking the pattern forever.
+constexpr ULONGLONG kPendingSubmission = 120ULL * Second;
 
 struct Record {
     DWORD magic = 0x5041544c;
@@ -176,6 +183,15 @@ HRESULT Read(Key& user, PCWSTR sid, Bundle& bundle) noexcept {
         record.tpmMode > 1 ||
         wcsnlen_s(record.user, ARRAYSIZE(record.user)) >= ARRAYSIZE(record.user) || !record.user[0] ||
         wcsnlen_s(record.sid, ARRAYSIZE(record.sid)) >= ARRAYSIZE(record.sid) || wcscmp(sid, record.sid)) return E_FAIL;
+    // Pending = disabled with a live one-shot token. A permanent disable (Windows
+    // declined the stored credential) zeroes the token and never expires here.
+    const BYTE none[16]{};
+    const ULONGLONG now = Now();
+    if (record.disabled && !Equal(record.submission, none, 16) && now >= record.lastSeen &&
+        now - record.lastSeen >= kPendingSubmission) {
+        record.disabled = 0;
+        SecureZeroMemory(record.submission, sizeof(record.submission));
+    }
     return S_OK;
 }
 
@@ -190,10 +206,13 @@ constexpr ULONGLONG kMaxPasswordAge = 0;
 
 HRESULT Check(Key& /*root*/, const Record& record) noexcept {
     const ULONGLONG now = Now();
+    // Lockout is judged against the later of "now" and the last recorded time, so
+    // tolerating small clock drift never shortens a lockout.
+    const ULONGLONG effective = now > record.lastSeen ? now : record.lastSeen;
     if (record.disabled || record.attempts >= 10 || !record.passwordTime ||
-        now < record.passwordTime || now < record.lastSeen ||
+        now + kClockSkewTolerance < record.passwordTime || now + kClockSkewTolerance < record.lastSeen ||
         (kMaxPasswordAge > 0 && now - record.passwordTime >= kMaxPasswordAge) ||
-        now < record.until) {
+        effective < record.until) {
         return E_ACCESSDENIED;
     }
     return S_OK;
@@ -353,7 +372,7 @@ HRESULT Refresh(PCWSTR name, PCWSTR sid, PCWSTR supplied) noexcept {
     Lock lock; if (!lock.Acquire()) return E_ACCESSDENIED;
     Key root, user; hr = OpenUser(sid, root, user); if (FAILED(hr)) return hr;
     Bundle bundle; hr = Read(user, sid, bundle); if (FAILED(hr)) return hr;
-    if (_wcsicmp(bundle.record.user, name) || bundle.record.disabled) return E_ACCESSDENIED;
+    if (_wcsicmp(bundle.record.user, name)) return E_ACCESSDENIED;
 
     // Verify supplied password matches the enrolled password using constant-time MAC comparison.
     // This allows refresh without requiring pattern entry, while ensuring changed passwords are rejected.
@@ -361,8 +380,13 @@ HRESULT Refresh(PCWSTR name, PCWSTR sid, PCWSTR supplied) noexcept {
     hr = ComputePasswordMac(bundle.key, supplied, expectedMac.data());
     if (FAILED(hr) || !Equal(expectedMac.data(), bundle.record.passwordMac, 32)) return E_ACCESSDENIED;
 
+    // The password was just proven twice (Windows + enrolled MAC), so refresh may
+    // also clear a disabled record (a stale pending submission or a transient
+    // Windows failure). A changed password fails the MAC check above: re-enroll.
     bundle.record.passwordTime = bundle.record.lastSeen = Now();
     bundle.record.attempts = 0; bundle.record.until = 0;
+    bundle.record.disabled = 0;
+    SecureZeroMemory(bundle.record.submission, sizeof(bundle.record.submission));
     return Save(user, bundle);
 }
 
@@ -397,9 +421,11 @@ HRESULT QueryRetryAfter(PCWSTR sid, DWORD* seconds) noexcept {
     Bundle bundle; hr = Read(user, sid, bundle); if (FAILED(hr)) return hr;
     const Record& record = bundle.record;
     const ULONGLONG now = Now();
-    if (record.disabled || record.attempts >= 10 || now < record.lastSeen || now < record.passwordTime ||
+    const ULONGLONG effective = now > record.lastSeen ? now : record.lastSeen;
+    if (record.disabled || record.attempts >= 10 || now + kClockSkewTolerance < record.lastSeen ||
+        now + kClockSkewTolerance < record.passwordTime ||
         !record.passwordTime || (kMaxPasswordAge && now - record.passwordTime >= kMaxPasswordAge)) return E_ACCESSDENIED;
-    if (record.until > now) *seconds = static_cast<DWORD>((record.until - now + Second - 1) / Second);
+    if (record.until > effective) *seconds = static_cast<DWORD>((record.until - effective + Second - 1) / Second);
     return S_OK;
 }
 
@@ -491,6 +517,7 @@ HRESULT Disable(PCWSTR sid) noexcept {
     Key root, user; HRESULT hr = OpenUser(sid, root, user); if (FAILED(hr)) return hr;
     Bundle bundle; hr = Read(user, sid, bundle); if (FAILED(hr)) return hr;
     bundle.record.disabled = 1;
+    SecureZeroMemory(bundle.record.submission, sizeof(bundle.record.submission)); // Permanent: never auto-expires.
     return Save(user, bundle);
 }
 
