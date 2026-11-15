@@ -20,10 +20,14 @@ HRESULT HashPattern(const Pattern& pattern, const BYTE salt[16], BYTE hash[32]) 
 HRESULT DeriveTpmAuthorization(const Pattern& pattern, const BYTE salt[16], BYTE auth[32]) noexcept;
 // Account must be an unqualified local username; SID comes from the verified token.
 HRESULT ValidatePassword(PCWSTR user, PCWSTR password, wchar_t (&sid)[184]) noexcept;
-HRESULT Enroll(PCWSTR user, PCWSTR sid, PCWSTR password, const Pattern& pattern) noexcept;
+// Without a TPM, enrollment fails with ERROR_NOT_SUPPORTED unless allowSoftwareKey
+// is true, because software-only storage keeps the key beside the ciphertext.
+HRESULT Enroll(PCWSTR user, PCWSTR sid, PCWSTR password, const Pattern& pattern, bool allowSoftwareKey) noexcept;
 HRESULT Refresh(PCWSTR user, PCWSTR sid, PCWSTR password) noexcept;
 HRESULT RemoveEnrollment(PCWSTR user, PCWSTR sid, PCWSTR password) noexcept;
 HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password = nullptr, BYTE* submission = nullptr) noexcept;
+// Clears a pending submission after Windows accepted it, or after the provider knows
+// the password never reached Windows (tile deselected, serialization failed).
 HRESULT FinishSubmission(PCWSTR sid, const BYTE submission[16]) noexcept;
 HRESULT Disable(PCWSTR sid) noexcept;
 HRESULT Eligible(PCWSTR sid) noexcept;

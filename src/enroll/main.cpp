@@ -4,6 +4,7 @@
 #include <strsafe.h>
 #include "pattern_window.h"
 #include "security.h"
+#include "tpm.h"
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
     const bool refresh = command && wcscmp(command, L"--refresh") == 0;
@@ -33,6 +34,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         if (MessageBoxW(nullptr, L"Remove this account's Pattern enrollment and active TPM key?\nWindows Password sign-in remains available.", L"Remove Patlock enrollment", MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
         hr = patlock::RemoveEnrollment(cleanUser, sid, password.data());
     }
+    bool allowSoftwareKey = false;
+    if (SUCCEEDED(hr) && !refresh && !remove) {
+        // Decide on storage before the pattern is drawn, so the user can back out.
+        const HRESULT probe = patlock::tpm::Probe();
+        if (FAILED(probe)) {
+            password.Clear();
+            MessageBoxW(nullptr, L"A TPM is present but could not be used, so nothing was saved.\n"
+                L"Check that the TPM is ready in tpm.msc and try again.", L"Patlock", MB_OK | MB_ICONERROR);
+            return 1;
+        }
+        if (probe == S_FALSE) {
+            if (MessageBoxW(nullptr, L"No TPM was found. Without one, the encryption key for your Windows password is "
+                L"stored next to it in the registry.\n\nAny administrator, and anyone who can read this disk while "
+                L"BitLocker/device encryption is off, can recover your Windows password.\n\n"
+                L"Use software-only storage anyway?", L"Patlock: no TPM", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+                password.Clear();
+                return 0;
+            }
+            allowSoftwareKey = true;
+        }
+    }
     if (SUCCEEDED(hr) && !refresh && !remove) {
         patlock::Pattern first, second;
         hr = patlock::DrawPattern(instance, nullptr, false, first);
@@ -41,7 +63,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         hr = patlock::DrawPattern(instance, nullptr, false, second);
         if (hr != S_OK) return FAILED(hr) ? 1 : 0;
         if (first.count != second.count || !patlock::Equal(first.dots.data(), second.dots.data(), first.count)) hr = E_INVALIDARG;
-        if (SUCCEEDED(hr)) hr = patlock::Enroll(cleanUser, sid, password.data(), first);
+        if (SUCCEEDED(hr)) hr = patlock::Enroll(cleanUser, sid, password.data(), first, allowSoftwareKey);
     }
     password.Clear();
     if (SUCCEEDED(hr) && remove) {
@@ -62,6 +84,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
                 L"Enter the account's Windows password, not its Windows Hello PIN.\n"
                 L"If needed, configure a password in Windows Settings, then try again.",
                 cleanUser);
+        } else if (refresh && hr == E_ACCESSDENIED) {
+            StringCchPrintfW(errorMsg, ARRAYSIZE(errorMsg),
+                L"This password does not match the one Patlock enrolled.\n\n"
+                L"If the Windows password was changed, enroll again (run without --refresh).");
         } else if (hr == E_INVALIDARG) {
             StringCchPrintfW(errorMsg, ARRAYSIZE(errorMsg),
                 L"Invalid input or mismatched pattern confirmation.\n"

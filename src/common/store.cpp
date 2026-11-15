@@ -11,10 +11,15 @@ namespace {
 constexpr PCWSTR RootPath = L"SOFTWARE\\Patlock";
 constexpr PCWSTR Access = L"D:P(A;;KA;;;SY)(A;;KA;;;BA)";
 constexpr ULONGLONG Second = 10000000ULL;
+constexpr size_t MaxPasswordChars = 512; // Including the terminator.
+// Version 7: in TPM mode the pattern verifier is keyed by the TPM-wrapped AES key,
+// so a copied record no longer allows offline pattern guessing; the password
+// verifier is PBKDF2 instead of a single HMAC. Versions 5 and 6 remain readable.
+constexpr DWORD CurrentVersion = 7;
 
 struct Record {
     DWORD magic = 0x5041544c;
-    DWORD version = 6;
+    DWORD version = CurrentVersion;
     DWORD iterations = HashIterations;
     DWORD attempts = 0;
     DWORD disabled = 0;
@@ -117,7 +122,7 @@ HRESULT ComputePasswordMac(const BYTE key[32], PCWSTR password, BYTE output[32])
 
     // Fixed-size buffer to prevent length-based timing attacks
     // Pad password to 512 characters (1024 bytes including null terminator)
-    constexpr size_t kMaxPasswordChars = 512;
+    constexpr size_t kMaxPasswordChars = MaxPasswordChars;
     wchar_t padded[kMaxPasswordChars]{};
     SecureZeroMemory(padded, sizeof(padded));
 
@@ -149,6 +154,55 @@ HRESULT ComputePasswordMac(const BYTE key[32], PCWSTR password, BYTE output[32])
     return result >= 0 ? S_OK : E_FAIL;
 }
 
+HRESULT Hmac(const BYTE key[32], const BYTE* data, ULONG length, BYTE output[32]) noexcept {
+    BCRYPT_ALG_HANDLE algorithm = nullptr; BCRYPT_HASH_HANDLE hash = nullptr;
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG) < 0) return E_FAIL;
+    NTSTATUS result = BCryptCreateHash(algorithm, &hash, nullptr, 0, const_cast<BYTE*>(key), 32, 0);
+    if (result >= 0) result = BCryptHashData(hash, const_cast<BYTE*>(data), length, 0);
+    if (result >= 0) result = BCryptFinishHash(hash, output, 32, 0);
+    if (hash) BCryptDestroyHash(hash);
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    return result >= 0 ? S_OK : E_FAIL;
+}
+
+// v7 TPM records store HMAC(aesKey, PBKDF2(pattern)) instead of the PBKDF2 value.
+// The AES key is only released by the TPM, so the stored value cannot be used to
+// test patterns offline, while a wrong pattern is still rejected even if the TPM
+// were ever to release the key without enforcing its authorization.
+HRESULT BindPatternVerifier(const BYTE aesKey[32], const BYTE patternHash[32], BYTE output[32]) noexcept {
+    static constexpr char Label[] = "Patlock v7 pattern verifier";
+    BYTE input[sizeof(Label) - 1 + 32]{};
+    CopyMemory(input, Label, sizeof(Label) - 1);
+    CopyMemory(input + sizeof(Label) - 1, patternHash, 32);
+    const HRESULT hr = Hmac(aesKey, input, sizeof(input), output);
+    SecureZeroMemory(input, sizeof(input));
+    return hr;
+}
+
+// v7 password verifier: PBKDF2 with the record salt in its own domain, so a copied
+// record is no faster to attack than the iteration count allows.
+HRESULT DerivePasswordVerifier(PCWSTR password, const BYTE salt[16], BYTE output[32]) noexcept {
+    if (!password) return E_INVALIDARG;
+    const size_t length = wcsnlen_s(password, MaxPasswordChars);
+    if (!length || length >= MaxPasswordChars) return E_INVALIDARG;
+    BYTE scopedSalt[19]{};
+    CopyMemory(scopedSalt, salt, 16);
+    scopedSalt[16] = 'P'; scopedSalt[17] = 'W'; scopedSalt[18] = 'D';
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, BCRYPT_ALG_HANDLE_HMAC_FLAG) < 0) return E_FAIL;
+    const NTSTATUS result = BCryptDeriveKeyPBKDF2(algorithm,
+        reinterpret_cast<PUCHAR>(const_cast<PWSTR>(password)), static_cast<ULONG>(length * sizeof(wchar_t)),
+        scopedSalt, sizeof(scopedSalt), HashIterations, output, 32, 0);
+    BCryptCloseAlgorithmProvider(algorithm, 0);
+    return result >= 0 ? S_OK : E_FAIL;
+}
+
+HRESULT PasswordVerifier(const Bundle& bundle, PCWSTR password, BYTE output[32]) noexcept {
+    return bundle.record.version >= 7
+        ? DerivePasswordVerifier(password, bundle.record.salt, output)
+        : ComputePasswordMac(bundle.key, password, output);
+}
+
 bool ValidSid(PCWSTR sid) noexcept {
     if (!sid || wcsnlen_s(sid, 184) >= 184) return false;
     PSID binary = nullptr;
@@ -170,7 +224,7 @@ HRESULT Read(Key& user, PCWSTR sid, Bundle& bundle) noexcept {
     Secret<BYTE, 32> mac;
     hr = Mac(bundle, mac.data());
     Record& record = bundle.record;
-    if (FAILED(hr) || !Equal(mac.data(), bundle.mac, 32) || record.magic != 0x5041544c || (record.version != 5 && record.version != 6) ||
+    if (FAILED(hr) || !Equal(mac.data(), bundle.mac, 32) || record.magic != 0x5041544c || (record.version < 5 || record.version > CurrentVersion) ||
         record.iterations != HashIterations || record.attempts > 10 || record.disabled > 1 ||
         record.cipherBytes < 4 || record.cipherBytes > sizeof(record.cipher) || record.cipherBytes % 2 ||
         record.tpmMode > 1 ||
@@ -241,8 +295,8 @@ HRESULT AuthenticatedIdentity(PCWSTR user, PCWSTR sid, PCWSTR password) noexcept
 }
 } // anon namespace
 
-HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern) noexcept {
-    if (!pattern.Valid() || !supplied || wcsnlen_s(supplied, 513) >= 513) return E_INVALIDARG;
+HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern, bool allowSoftwareKey) noexcept {
+    if (!pattern.Valid() || !supplied || wcsnlen_s(supplied, MaxPasswordChars) >= MaxPasswordChars) return E_INVALIDARG;
     HRESULT hr = AuthenticatedIdentity(name, sid, supplied); if (FAILED(hr)) return hr;
     Lock lock; if (!lock.Acquire()) return E_ACCESSDENIED;
     Key root, user; hr = OpenUser(sid, root, user, true); if (FAILED(hr)) return hr;
@@ -263,7 +317,7 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
     if (SUCCEEDED(hr)) hr = Random(bundle.record.nonce, sizeof(bundle.record.nonce));
     if (SUCCEEDED(hr)) hr = HashPattern(pattern, bundle.record.salt, bundle.record.hash);
     if (FAILED(hr)) return hr;
-    hr = ComputePasswordMac(bundle.key, supplied, bundle.record.passwordMac);
+    hr = DerivePasswordVerifier(supplied, bundle.record.salt, bundle.record.passwordMac);
     if (FAILED(hr)) return hr;
 
     // Key management: validate TPM, then try TPM-backed protection; only fall back to baseline on S_FALSE.
@@ -290,7 +344,16 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
         wchar_t identity[240]{};
         if (SUCCEEDED(tpmHr)) tpmHr = KeyIdentity(bundle.record, identity);
         if (SUCCEEDED(tpmHr)) tpmHr = tpm::ProtectKey(identity, authorization.data(), aesKey.data(), bundle.record.tpmWrappedKey);
-
+        if (SUCCEEDED(tpmHr)) {
+            // Replace the plain PBKDF2 value with one bound to the TPM-wrapped key.
+            Secret<BYTE, 32> plainHash;
+            CopyMemory(plainHash.data(), bundle.record.hash, 32);
+            tpmHr = BindPatternVerifier(aesKey.data(), plainHash.data(), bundle.record.hash);
+            if (FAILED(tpmHr)) {
+                tpm::DeleteKey(identity);
+                return tpmHr;
+            }
+        }
 
         if (SUCCEEDED(tpmHr)) {
             bundle.record.tpmMode = 1;
@@ -301,7 +364,9 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
             return tpmHr;
         }
     } else {
-        // probe == S_FALSE: TPM definitively absent, baseline fallback permitted
+        // probe == S_FALSE: TPM definitively absent. Software-only storage keeps the
+        // AES key beside the ciphertext, so it needs the caller's explicit consent.
+        if (!allowSoftwareKey) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
         bundle.record.tpmMode = 0;
         SecureZeroMemory(bundle.record.tpmWrappedKey, sizeof(bundle.record.tpmWrappedKey));
         CopyMemory(aesKey.data(), bundle.key, 32);
@@ -353,16 +418,20 @@ HRESULT Refresh(PCWSTR name, PCWSTR sid, PCWSTR supplied) noexcept {
     Lock lock; if (!lock.Acquire()) return E_ACCESSDENIED;
     Key root, user; hr = OpenUser(sid, root, user); if (FAILED(hr)) return hr;
     Bundle bundle; hr = Read(user, sid, bundle); if (FAILED(hr)) return hr;
-    if (_wcsicmp(bundle.record.user, name) || bundle.record.disabled) return E_ACCESSDENIED;
+    if (_wcsicmp(bundle.record.user, name)) return E_ACCESSDENIED;
 
-    // Verify supplied password matches the enrolled password using constant-time MAC comparison.
-    // This allows refresh without requiring pattern entry, while ensuring changed passwords are rejected.
+    // The supplied password was just accepted by Windows. If it also matches the
+    // enrolled copy, that copy is current, so lockout and any disabled/pending
+    // submission state can be cleared safely. A changed password is rejected here
+    // and needs full re-enrollment.
     Secret<BYTE, 32> expectedMac;
-    hr = ComputePasswordMac(bundle.key, supplied, expectedMac.data());
+    hr = PasswordVerifier(bundle, supplied, expectedMac.data());
     if (FAILED(hr) || !Equal(expectedMac.data(), bundle.record.passwordMac, 32)) return E_ACCESSDENIED;
 
     bundle.record.passwordTime = bundle.record.lastSeen = Now();
     bundle.record.attempts = 0; bundle.record.until = 0;
+    bundle.record.disabled = 0;
+    SecureZeroMemory(bundle.record.submission, sizeof(bundle.record.submission));
     return Save(user, bundle);
 }
 
@@ -420,7 +489,10 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* sub
 
     Secret<BYTE, 32> hash;
     hr = HashPattern(pattern, bundle.record.salt, hash.data());
-    if (FAILED(hr) || !Equal(hash.data(), bundle.record.hash, 32)) return E_ACCESSDENIED;
+    if (FAILED(hr)) return E_ACCESSDENIED;
+    // v7 TPM records hold a key-bound verifier, checked after the TPM releases the key.
+    const bool boundVerifier = bundle.record.tpmMode == 1 && bundle.record.version >= 7;
+    if (!boundVerifier && !Equal(hash.data(), bundle.record.hash, 32)) return E_ACCESSDENIED;
 
     // Resolve the AES decryption key.
     Secret<BYTE, 32> aesKey;
@@ -432,6 +504,11 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* sub
         if (SUCCEEDED(hr)) hr = KeyIdentity(bundle.record, identity);
         if (SUCCEEDED(hr)) hr = tpm::UnprotectKey(identity, authorization.data(), bundle.record.tpmWrappedKey, aesKey.data());
         if (FAILED(hr)) return E_ACCESSDENIED;
+        if (boundVerifier) {
+            Secret<BYTE, 32> expected;
+            hr = BindPatternVerifier(aesKey.data(), hash.data(), expected.data());
+            if (FAILED(hr) || !Equal(expected.data(), bundle.record.hash, 32)) { aesKey.Clear(); return E_ACCESSDENIED; }
+        }
     } else {
         CopyMemory(aesKey.data(), bundle.key, 32);
     }
