@@ -30,7 +30,9 @@ Baseline:
 Hardened:
 - TPM-backed key supplied a separate pattern authorization. Hardware rate limiting
   is not asserted until verified on the target TPM/KSP.
-- Fall back to baseline if no TPM. Document which mode is active.
+- Software-key mode is disabled by default. It can be explicitly enabled only on
+  a throwaway test machine through the administrator-controlled policy described
+  below; it is not a production fallback.
 
 ## Rules for code
 - Availability across reboots & lockout (Option A): Pattern unlock remains active across reboots, matching Windows Hello PIN convenience. Durably persisted escalating lockouts (30s, 1m, 5m, 15m; disabled at 10) protect against brute-force guessing. Password freshness expiration is configurable via `kMaxPasswordAge` (default disabled). Stale passwords resulting from password changes are handled by one-shot failure detection and fallback to the built-in Password tile.
@@ -45,3 +47,20 @@ Hardened:
 
 ## Known flaws and mitigations
 See `PLAN.md` section 7. Keep that list updated as real tests reveal more.
+
+## Hardening policy (software keys and audit trail)
+- **TPM required by default.** A software-key (baseline) record stores its AES key beside the
+  ciphertext, so the pattern is only a gate: anyone able to read `HKLM\SOFTWARE\Patlock`
+  can decrypt the stored password. Enrollment now refuses baseline mode, and existing baseline
+  records are treated as unavailable, unless an administrator sets
+  `HKLM\SOFTWARE\Policies\Patlock\AllowSoftwareKey` (DWORD 1). Use that only on throwaway
+  test machines.
+- **Audit trail.** Enrollment, accepted and incorrect patterns, lockouts,
+  disabling, enrollment failures and TPM retirement failures are written to the
+  Application log (source `Patlock`, event IDs 2000-2003 and 2010-2012). Events
+  carry only the account SID, counters and HRESULT metadata.
+- **Known limits (not fixed here).** The PBKDF2 verifier is stored in the record, so an
+  administrator-level reader can guess the roughly 380,000 possible patterns offline; the
+  password MAC is likewise a fast offline oracle for the Windows password. Removing the stored
+  verifier in TPM mode depends on proven TPM authorization enforcement (TPM_VALIDATION.md).
+  An independent security review is still required.

@@ -260,9 +260,11 @@ HRESULT DeleteKey(PCWSTR identity) noexcept {
     if (status != ERROR_SUCCESS) return Status(status);
     KeyHandle key;
     status = NCryptOpenKey(provider.h, &key.h, keyName, 0, NCRYPT_MACHINE_KEY_FLAG | NCRYPT_SILENT_FLAG);
-    if (status == NTE_BAD_KEYSET || status == NTE_NOT_FOUND) return S_FALSE;
+    if (status == NTE_BAD_KEYSET || status == NTE_NOT_FOUND || status == NTE_NO_KEY || status == NTE_BAD_KEY_STATE) return S_FALSE; // already gone
     if (status != ERROR_SUCCESS) return Status(status);
-    return key.Delete();
+    const HRESULT deleted = key.Delete();
+    return (deleted == NTE_BAD_KEYSET || deleted == NTE_NOT_FOUND || deleted == NTE_NO_KEY ||
+        deleted == NTE_BAD_KEY_STATE) ? S_FALSE : deleted;
 }
 } // namespace tpm
 } // namespace patlock

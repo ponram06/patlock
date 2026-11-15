@@ -16,7 +16,7 @@ struct PatternLayout {
     static constexpr int StatusTop      = 200;
     static constexpr int StatusHeight   = 24;
     // Gap between the native username text and the top of this block.
-    static constexpr int AnchorGap      = 10;
+    static constexpr int AnchorGap      = 28;
     // Used only when UI Automation cannot locate the native username.
     static constexpr int FallbackCenterOffset = 35;
 };

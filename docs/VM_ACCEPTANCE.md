@@ -11,7 +11,7 @@ Inside elevated Developer PowerShell in the Windows 11 VMware VM:
 
 ```powershell
 git pull --ff-only
-.\install\build-and-test.ps1 -AcknowledgeVm
+.\install\Build-Release.ps1 -CertThumbprint <test-certificate-SHA1>
 ```
 
 Inspect warnings as well as exit codes. This builds C++17 x64 with /MT and runs
@@ -26,11 +26,12 @@ If any step fails, stop before installation and report the error without secrets
    verify the Pattern tile is absent while Password still works.
 3. Remove only the old PatlockProvider.dll from System32 in the VM after reboot.
    Installer deliberately refuses to overwrite a loaded/existing DLL.
-4. Install the new DLL:
+4. Install the guarded release package:
 
    ```powershell
-   .\install\install.ps1 -DllPath .\build\Release\PatlockProvider.dll -AcknowledgeVm -SnapshotAndPasswordFallbackVerified
-   .\build\Release\patlock_enroll.exe
+   Expand-Archive .\dist\Patlock-Release.zip .\dist\Patlock-Release
+   .\dist\Patlock-Release\Install.cmd
+   & "$env:ProgramFiles\Patlock\patlock_enroll.exe"
    ```
 
 5. Enter a throwaway local account's actual Windows password and draw the same
@@ -89,9 +90,9 @@ Authenticode signatures in the VM. No signing certificate is bundled.
 Package only after those checks:
 
 ```powershell
-.\install\package.ps1 -OutputDir dist\Patlock-candidate
+.\install\Build-Release.ps1 -CertThumbprint <publisher-certificate-SHA1>
 ```
 
-The packaging script refuses to recursively replace an existing output directory
-and emits SHA256SUMS.txt. Review the archive and signatures before distribution.
+The release script stops packaging on failed CTest and emits SHA256SUMS.txt.
+Review the archive and signatures before distribution.
 No automated claim of production readiness is made by that script.

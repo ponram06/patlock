@@ -34,26 +34,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         if (MessageBoxW(nullptr, L"Remove this account's Pattern enrollment and active TPM key?\nWindows Password sign-in remains available.", L"Remove Patlock enrollment", MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
         hr = patlock::RemoveEnrollment(cleanUser, sid, password.data());
     }
-    bool allowSoftwareKey = false;
-    if (SUCCEEDED(hr) && !refresh && !remove) {
-        // Decide on storage before the pattern is drawn, so the user can back out.
-        const HRESULT probe = patlock::tpm::Probe();
-        if (FAILED(probe)) {
-            password.Clear();
-            MessageBoxW(nullptr, L"A TPM is present but could not be used, so nothing was saved.\n"
-                L"Check that the TPM is ready in tpm.msc and try again.", L"Patlock", MB_OK | MB_ICONERROR);
-            return 1;
-        }
-        if (probe == S_FALSE) {
-            if (MessageBoxW(nullptr, L"No TPM was found. Without one, the encryption key for your Windows password is "
-                L"stored next to it in the registry.\n\nAny administrator, and anyone who can read this disk while "
-                L"BitLocker/device encryption is off, can recover your Windows password.\n\n"
-                L"Use software-only storage anyway?", L"Patlock: no TPM", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
-                password.Clear();
-                return 0;
-            }
-            allowSoftwareKey = true;
-        }
+    if (SUCCEEDED(hr) && !refresh && !remove && FAILED(patlock::tpm::Probe())) {
+        // Fail before the pattern is drawn. A missing TPM (S_FALSE) is handled by
+        // Enroll, which refuses unless the AllowSoftwareKey policy is set.
+        password.Clear();
+        MessageBoxW(nullptr, L"A TPM is present but could not be used, so nothing was saved.\n"
+            L"Check that the TPM is ready in tpm.msc and try again.", L"Patlock", MB_OK | MB_ICONERROR);
+        return 1;
     }
     if (SUCCEEDED(hr) && !refresh && !remove) {
         patlock::Pattern first, second;
@@ -63,7 +50,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         hr = patlock::DrawPattern(instance, nullptr, false, second);
         if (hr != S_OK) return FAILED(hr) ? 1 : 0;
         if (first.count != second.count || !patlock::Equal(first.dots.data(), second.dots.data(), first.count)) hr = E_INVALIDARG;
-        if (SUCCEEDED(hr)) hr = patlock::Enroll(cleanUser, sid, password.data(), first, allowSoftwareKey);
+        if (SUCCEEDED(hr)) hr = patlock::Enroll(cleanUser, sid, password.data(), first);
     }
     password.Clear();
     if (SUCCEEDED(hr) && remove) {
@@ -75,7 +62,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
             ? L"Enrolled with a TPM-backed key (experimental; protection requires validation).\nPattern unlock is active and persists across reboots."
             : L"Enrolled successfully in baseline mode (software store).\nPattern unlock is active and persists across reboots.";
         MessageBoxW(nullptr, modeMsg, L"Patlock", MB_OK | MB_ICONINFORMATION);
-        if (hr == S_FALSE) MessageBoxW(nullptr, L"The new enrollment was saved, but an old TPM key could not be retired.\nThe active credential is usable; see the recovery notes for cleanup.", L"Patlock cleanup", MB_OK | MB_ICONWARNING);
+        if (hr == S_FALSE) {
+            wchar_t warn[320];
+            StringCchPrintfW(warn, ARRAYSIZE(warn), L"The new enrollment was saved, but an old TPM key could not be retired (error 0x%08X).\nThe active credential is usable; see the recovery notes for cleanup.", static_cast<unsigned>(patlock::LastRetireError()));
+            MessageBoxW(nullptr, warn, L"Patlock cleanup", MB_OK | MB_ICONWARNING);
+        }
     } else {
         wchar_t errorMsg[512];
         if (hr == HRESULT_FROM_WIN32(ERROR_LOGON_FAILURE)) {
@@ -88,6 +79,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
             StringCchPrintfW(errorMsg, ARRAYSIZE(errorMsg),
                 L"This password does not match the one Patlock enrolled.\n\n"
                 L"If the Windows password was changed, enroll again (run without --refresh).");
+        } else if (hr == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED)) {
+            StringCchPrintfW(errorMsg, ARRAYSIZE(errorMsg),
+                L"This PC has no usable TPM, and Patlock requires a TPM-backed key by default.\n\n"
+                L"On a throwaway test machine only, an administrator can allow a software key:\n"
+                L"reg add HKLM\\SOFTWARE\\Policies\\Patlock /v AllowSoftwareKey /t REG_DWORD /d 1 /f\n\n"
+                L"A software key does not protect the stored password from anyone who can read the registry.");
         } else if (hr == E_INVALIDARG) {
             StringCchPrintfW(errorMsg, ARRAYSIZE(errorMsg),
                 L"Invalid input or mismatched pattern confirmation.\n"

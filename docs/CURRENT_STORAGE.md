@@ -27,8 +27,9 @@ Format 5/6 records are still read and verified the old way. Re-enroll to upgrade
 - **Password verifier is PBKDF2** (600,000 iterations, record salt, separate
   domain) instead of one HMAC keyed by a value stored in the same record. Used only
   by `--refresh` to confirm that the enrolled password copy is still current.
-- **Baseline (no TPM) mode requires consent.** `Enroll` fails with
-  ERROR_NOT_SUPPORTED unless the enrollment tool's warning is accepted. Baseline
+- **Baseline (no TPM) mode is off by default.** `Enroll` fails with
+  ERROR_NOT_SUPPORTED, and existing baseline records are refused at unlock, unless
+  `HKLM\SOFTWARE\Policies\Patlock` `AllowSoftwareKey` is 1. Baseline
   still keeps its key beside the ciphertext, and its verifier still permits offline
   pattern guessing. Only disk encryption and the registry DACL protect it.
 

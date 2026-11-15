@@ -12,13 +12,27 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-15: Release/install documentation and guarded packaging
+- Written: `Build-Release.ps1`, guarded installer/uninstaller, SHA-256 and
+  Authenticode verification, versioned DLL upgrades, Event Log source lifecycle,
+  and production/recovery/test documentation.
+- Written: Event Log audit metadata for enrollment failures, lockouts and TPM
+  retirement failures; no patterns, passwords, keys or hashes are logged.
+- Verification: PowerShell parsing and source/whitespace review only. No host
+  build, CTest, signing, registry/TPM operation, package install, uninstall or
+  lock-screen test was run.
+- VM action: run `Build-Release.ps1`, then the full matrix in PRODUCTION.md and
+  record results before describing any build as production-ready.
+
 ### 2026-11-15: Security audit fixes (record format 7)
 - Written (not built, not run; agent works on the host and does not build):
   - Record format 7: the TPM-mode pattern verifier is bound to the TPM-wrapped AES
     key, closing the offline pattern-guessing gap that format 6 documented. The
     password verifier is now PBKDF2. Format 5/6 records keep their old behaviour.
     See CURRENT_STORAGE.md.
-  - Software-only (no TPM) enrollment now needs explicit consent in patlock_enroll.
+  - (Merged with the GitHub commits of the same day: software-only enrollment is
+    governed by their AllowSoftwareKey policy, not a consent dialog. Their audit
+    events now also cover wrong patterns caught by the format 7 TPM check.)
   - Provider releases the one-shot submission reservation when a verified password
     never reached Windows: tile deselected, window closed after success, or
     GetSerialization failed. This prevents "Pattern unavailable" after a
@@ -39,7 +53,8 @@ Update after every session. Keep it honest: separate "written" from "verified on
   5. Change the password, draw the pattern, and confirm Windows declines once.
      Then `--refresh` with the new password must be refused with the "enroll again"
      message, and re-enrollment must work.
-  6. VM without a TPM: enrollment shows the no-TPM warning. "No" saves nothing; "Yes" enrolls.
+  6. VM without a TPM: enrollment is refused with the AllowSoftwareKey message;
+     with the policy set to 1 it enrolls.
   7. An existing format 6 record must still unlock before re-enrolling.
   8. `update.ps1`, then `uninstall.ps1`: uninstall must succeed.
 - Not verified: everything above. Compilation, TPM behaviour for wrong-auth decrypts

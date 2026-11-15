@@ -8,6 +8,7 @@
 
 namespace patlock {
 namespace {
+HRESULT g_lastRetireError = S_OK;
 constexpr PCWSTR RootPath = L"SOFTWARE\\Patlock";
 constexpr PCWSTR Access = L"D:P(A;;KA;;;SY)(A;;KA;;;BA)";
 constexpr ULONGLONG Second = 10000000ULL;
@@ -16,6 +17,13 @@ constexpr size_t MaxPasswordChars = 512; // Including the terminator.
 // so a copied record no longer allows offline pattern guessing; the password
 // verifier is PBKDF2 instead of a single HMAC. Versions 5 and 6 remain readable.
 constexpr DWORD CurrentVersion = 7;
+// Wall-clock drift tolerated before the pattern is refused. VM time sync, NTP and
+// snapshot restores move the clock backwards by seconds or minutes; without a
+// tolerance the "clock went backwards" guard bricked the pattern until refresh.
+constexpr ULONGLONG kClockSkewTolerance = 10ULL * 60 * Second;
+// A verified submission that never reached Windows (tile deselected, LogonUI
+// restarted, crash) expires after this long instead of blocking the pattern forever.
+constexpr ULONGLONG kPendingSubmission = 120ULL * Second;
 
 struct Record {
     DWORD magic = 0x5041544c;
@@ -230,6 +238,15 @@ HRESULT Read(Key& user, PCWSTR sid, Bundle& bundle) noexcept {
         record.tpmMode > 1 ||
         wcsnlen_s(record.user, ARRAYSIZE(record.user)) >= ARRAYSIZE(record.user) || !record.user[0] ||
         wcsnlen_s(record.sid, ARRAYSIZE(record.sid)) >= ARRAYSIZE(record.sid) || wcscmp(sid, record.sid)) return E_FAIL;
+    // Pending = disabled with a live one-shot token. A permanent disable (Windows
+    // declined the stored credential) zeroes the token and never expires here.
+    const BYTE none[16]{};
+    const ULONGLONG now = Now();
+    if (record.disabled && !Equal(record.submission, none, 16) && now >= record.lastSeen &&
+        now - record.lastSeen >= kPendingSubmission) {
+        record.disabled = 0;
+        SecureZeroMemory(record.submission, sizeof(record.submission));
+    }
     return S_OK;
 }
 
@@ -242,12 +259,52 @@ HRESULT Save(Key& user, Bundle& bundle) noexcept {
 // Set kMaxPasswordAge to 0 to disable password age expiration (e.g. 30ULL * 86400 * Second).
 constexpr ULONGLONG kMaxPasswordAge = 0;
 
+// A software-key ("baseline") record keeps its AES key next to the ciphertext, so
+// the pattern gives no cryptographic protection against anyone who can read the
+// registry. A TPM-backed key is therefore required unless an administrator opts
+// out on a throwaway test machine:
+//   reg add HKLM\SOFTWARE\Policies\Patlock /v AllowSoftwareKey /t REG_DWORD /d 1 /f
+bool SoftwareKeyAllowed() noexcept {
+    DWORD value = 0, size = sizeof(value);
+    const LSTATUS result = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Policies\\Patlock", L"AllowSoftwareKey",
+        RRF_RT_REG_DWORD | RRF_SUBKEY_WOW6464KEY, nullptr, &value, &size);
+    return result == ERROR_SUCCESS && value == 1;
+}
+
+// Security audit trail in the Application log (source "Patlock"). Text carries only
+// the account SID and counters, never the pattern, password, keys or hashes.
+void Audit(WORD type, DWORD id, PCWSTR text) noexcept {
+    HANDLE source = RegisterEventSourceW(nullptr, L"Patlock");
+    if (!source) return;
+    ReportEventW(source, type, 0, id, nullptr, 1, 0, &text, nullptr);
+    DeregisterEventSource(source);
+}
+
+HRESULT AuditEnrollmentFailure(PCWSTR sid, HRESULT hr) noexcept {
+    wchar_t text[200]{};
+    StringCchPrintfW(text, ARRAYSIZE(text), L"Pattern enrollment failed for %s (error 0x%08X).",
+        sid && *sid ? sid : L"unknown account", static_cast<unsigned>(hr));
+    Audit(EVENTLOG_ERROR_TYPE, 2011, text);
+    return hr;
+}
+
+// Text carries only the SID and the attempt count.
+void AuditIncorrectPattern(PCWSTR sid, DWORD attempts) noexcept {
+    wchar_t text[200]{};
+    StringCchPrintfW(text, ARRAYSIZE(text), L"Incorrect pattern for %s (failed attempt %lu of 10).", sid, attempts);
+    Audit(EVENTLOG_WARNING_TYPE, 2001, text);
+}
+
 HRESULT Check(Key& /*root*/, const Record& record) noexcept {
     const ULONGLONG now = Now();
+    // Lockout is judged against the later of "now" and the last recorded time, so
+    // tolerating small clock drift never shortens a lockout.
+    const ULONGLONG effective = now > record.lastSeen ? now : record.lastSeen;
     if (record.disabled || record.attempts >= 10 || !record.passwordTime ||
-        now < record.passwordTime || now < record.lastSeen ||
+        (record.tpmMode != 1 && !SoftwareKeyAllowed()) ||
+        now + kClockSkewTolerance < record.passwordTime || now + kClockSkewTolerance < record.lastSeen ||
         (kMaxPasswordAge > 0 && now - record.passwordTime >= kMaxPasswordAge) ||
-        now < record.until) {
+        effective < record.until) {
         return E_ACCESSDENIED;
     }
     return S_OK;
@@ -295,11 +352,11 @@ HRESULT AuthenticatedIdentity(PCWSTR user, PCWSTR sid, PCWSTR password) noexcept
 }
 } // anon namespace
 
-HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern, bool allowSoftwareKey) noexcept {
-    if (!pattern.Valid() || !supplied || wcsnlen_s(supplied, MaxPasswordChars) >= MaxPasswordChars) return E_INVALIDARG;
-    HRESULT hr = AuthenticatedIdentity(name, sid, supplied); if (FAILED(hr)) return hr;
-    Lock lock; if (!lock.Acquire()) return E_ACCESSDENIED;
-    Key root, user; hr = OpenUser(sid, root, user, true); if (FAILED(hr)) return hr;
+HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern) noexcept {
+    if (!pattern.Valid() || !supplied || wcsnlen_s(supplied, MaxPasswordChars) >= MaxPasswordChars) return AuditEnrollmentFailure(sid, E_INVALIDARG);
+    HRESULT hr = AuthenticatedIdentity(name, sid, supplied); if (FAILED(hr)) return AuditEnrollmentFailure(sid, hr);
+    Lock lock; if (!lock.Acquire()) return AuditEnrollmentFailure(sid, E_ACCESSDENIED);
+    Key root, user; hr = OpenUser(sid, root, user, true); if (FAILED(hr)) return AuditEnrollmentFailure(sid, hr);
 
     // Retire the previous generation only after the replacement record commits.
     Bundle previous;
@@ -316,19 +373,19 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern,
     if (SUCCEEDED(hr)) hr = Random(bundle.record.salt, sizeof(bundle.record.salt));
     if (SUCCEEDED(hr)) hr = Random(bundle.record.nonce, sizeof(bundle.record.nonce));
     if (SUCCEEDED(hr)) hr = HashPattern(pattern, bundle.record.salt, bundle.record.hash);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) return AuditEnrollmentFailure(sid, hr);
     hr = DerivePasswordVerifier(supplied, bundle.record.salt, bundle.record.passwordMac);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) return AuditEnrollmentFailure(sid, hr);
 
     // Key management: validate TPM, then try TPM-backed protection; only fall back to baseline on S_FALSE.
     Secret<BYTE, 32> aesKey;
     hr = Random(aesKey.data(), 32);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) return AuditEnrollmentFailure(sid, hr);
 
     const HRESULT probe = tpm::Probe();
     if (FAILED(probe)) {
         // TPM provider exists but hardware is unavailable/locked - abort enrollment
-        return probe;
+        return AuditEnrollmentFailure(sid, probe);
     }
 
     if (probe == S_OK) {
@@ -336,7 +393,7 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern,
         HRESULT validationHr = tpm::ValidateAuthorization();
         if (FAILED(validationHr)) {
             // TPM exists but authorization enforcement is broken - abort enrollment
-            return validationHr;
+            return AuditEnrollmentFailure(sid, validationHr);
         }
 
         Secret<BYTE, 32> authorization;
@@ -351,7 +408,7 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern,
             tpmHr = BindPatternVerifier(aesKey.data(), plainHash.data(), bundle.record.hash);
             if (FAILED(tpmHr)) {
                 tpm::DeleteKey(identity);
-                return tpmHr;
+                return AuditEnrollmentFailure(sid, tpmHr);
             }
         }
 
@@ -361,23 +418,24 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern,
             createdTpm = true;
         } else {
             // TPM operation failed after validation passed - abort enrollment, don't fall back
-            return tpmHr;
+            return AuditEnrollmentFailure(sid, tpmHr);
         }
     } else {
-        // probe == S_FALSE: TPM definitively absent. Software-only storage keeps the
-        // AES key beside the ciphertext, so it needs the caller's explicit consent.
-        if (!allowSoftwareKey) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+        // probe == S_FALSE: TPM definitively absent. A software key does not protect
+        // the stored password from anyone who can read the registry, so refuse
+        // unless an administrator explicitly allowed it (test machines only).
+        if (!SoftwareKeyAllowed()) return AuditEnrollmentFailure(sid, HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED));
         bundle.record.tpmMode = 0;
         SecureZeroMemory(bundle.record.tpmWrappedKey, sizeof(bundle.record.tpmWrappedKey));
         CopyMemory(aesKey.data(), bundle.key, 32);
     }
 
     hr = Random(bundle.record.boot, sizeof(bundle.record.boot));
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) return AuditEnrollmentFailure(sid, hr);
 
     Password password;
     hr = StringCchCopyW(password.data(), password.value.size(), supplied);
-    if (FAILED(hr)) return hr;
+    if (FAILED(hr)) return AuditEnrollmentFailure(sid, hr);
 
     bundle.record.cipherBytes = static_cast<DWORD>((wcslen(password.data()) + 1) * sizeof(wchar_t));
     hr = CipherWithKey(aesKey.data(), bundle.record, password, true);
@@ -385,7 +443,7 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern,
     aesKey.Clear();
     if (FAILED(hr)) {
         if (createdTpm) tpm::DeleteKey(createdIdentity);
-        return hr;
+        return AuditEnrollmentFailure(sid, hr);
     }
 
     bundle.record.passwordTime = bundle.record.lastSeen = Now();
@@ -395,17 +453,26 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern,
         // Record write failed - clean up the new TPM key
         if (createdTpm) {
             const HRESULT cleanup = tpm::DeleteKey(createdIdentity);
-            if (FAILED(cleanup)) return cleanup;  // Propagate cleanup failure
+            if (FAILED(cleanup)) return AuditEnrollmentFailure(sid, cleanup);  // Propagate cleanup failure
         }
-        return hr;
+        return AuditEnrollmentFailure(sid, hr);
+    }
+
+    {
+        wchar_t text[160]{};
+        StringCchPrintfW(text, ARRAYSIZE(text), L"Pattern enrolled for %s (%s key).", sid, bundle.record.tpmMode == 1 ? L"TPM-backed" : L"software");
+        Audit(EVENTLOG_INFORMATION_TYPE, 2010, text);
     }
 
     // Record committed successfully - now safe to retire the old TPM key
     if (retirePrevious) {
         HRESULT retireHr = tpm::DeleteKey(previousIdentity);
         if (FAILED(retireHr)) {
-            // Log the orphaned key but don't fail the enrollment
-            // TODO: Add event log entry for manual cleanup: previousIdentity
+            wchar_t text[200]{};
+            StringCchPrintfW(text, ARRAYSIZE(text), L"Old TPM key retirement failed for %s (error 0x%08X).",
+                sid, static_cast<unsigned>(retireHr));
+            Audit(EVENTLOG_WARNING_TYPE, 2012, text);
+            g_lastRetireError = retireHr;
             return S_FALSE;  // Partial success: new key works, old key orphaned
         }
     }
@@ -428,6 +495,9 @@ HRESULT Refresh(PCWSTR name, PCWSTR sid, PCWSTR supplied) noexcept {
     hr = PasswordVerifier(bundle, supplied, expectedMac.data());
     if (FAILED(hr) || !Equal(expectedMac.data(), bundle.record.passwordMac, 32)) return E_ACCESSDENIED;
 
+    // The password was just proven twice (Windows + enrolled MAC), so refresh may
+    // also clear a disabled record (a stale pending submission or a transient
+    // Windows failure). A changed password fails the MAC check above: re-enroll.
     bundle.record.passwordTime = bundle.record.lastSeen = Now();
     bundle.record.attempts = 0; bundle.record.until = 0;
     bundle.record.disabled = 0;
@@ -466,9 +536,12 @@ HRESULT QueryRetryAfter(PCWSTR sid, DWORD* seconds) noexcept {
     Bundle bundle; hr = Read(user, sid, bundle); if (FAILED(hr)) return hr;
     const Record& record = bundle.record;
     const ULONGLONG now = Now();
-    if (record.disabled || record.attempts >= 10 || now < record.lastSeen || now < record.passwordTime ||
+    const ULONGLONG effective = now > record.lastSeen ? now : record.lastSeen;
+    if (record.disabled || record.attempts >= 10 || (record.tpmMode != 1 && !SoftwareKeyAllowed()) ||
+        now + kClockSkewTolerance < record.lastSeen ||
+        now + kClockSkewTolerance < record.passwordTime ||
         !record.passwordTime || (kMaxPasswordAge && now - record.passwordTime >= kMaxPasswordAge)) return E_ACCESSDENIED;
-    if (record.until > now) *seconds = static_cast<DWORD>((record.until - now + Second - 1) / Second);
+    if (record.until > effective) *seconds = static_cast<DWORD>((record.until - effective + Second - 1) / Second);
     return S_OK;
 }
 
@@ -486,13 +559,21 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* sub
     ++bundle.record.attempts; bundle.record.lastSeen = Now();
     bundle.record.until = bundle.record.lastSeen + LockoutSeconds(bundle.record.attempts) * Second;
     hr = Save(user, bundle); if (FAILED(hr)) return hr;
+    if (const DWORD delay = LockoutSeconds(bundle.record.attempts); delay != 0) {
+        wchar_t text[200]{};
+        StringCchPrintfW(text, ARRAYSIZE(text), L"Pattern lockout for %s after attempt %lu (delay %lu seconds).",
+            sid, bundle.record.attempts, delay);
+        Audit(EVENTLOG_WARNING_TYPE, 2003, text);
+    }
 
     Secret<BYTE, 32> hash;
     hr = HashPattern(pattern, bundle.record.salt, hash.data());
-    if (FAILED(hr)) return E_ACCESSDENIED;
     // v7 TPM records hold a key-bound verifier, checked after the TPM releases the key.
     const bool boundVerifier = bundle.record.tpmMode == 1 && bundle.record.version >= 7;
-    if (!boundVerifier && !Equal(hash.data(), bundle.record.hash, 32)) return E_ACCESSDENIED;
+    if (FAILED(hr) || (!boundVerifier && !Equal(hash.data(), bundle.record.hash, 32))) {
+        AuditIncorrectPattern(sid, bundle.record.attempts);
+        return E_ACCESSDENIED;
+    }
 
     // Resolve the AES decryption key.
     Secret<BYTE, 32> aesKey;
@@ -503,11 +584,16 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* sub
         wchar_t identity[240]{};
         if (SUCCEEDED(hr)) hr = KeyIdentity(bundle.record, identity);
         if (SUCCEEDED(hr)) hr = tpm::UnprotectKey(identity, authorization.data(), bundle.record.tpmWrappedKey, aesKey.data());
+        if (FAILED(hr) && boundVerifier) AuditIncorrectPattern(sid, bundle.record.attempts);
         if (FAILED(hr)) return E_ACCESSDENIED;
         if (boundVerifier) {
             Secret<BYTE, 32> expected;
             hr = BindPatternVerifier(aesKey.data(), hash.data(), expected.data());
-            if (FAILED(hr) || !Equal(expected.data(), bundle.record.hash, 32)) { aesKey.Clear(); return E_ACCESSDENIED; }
+            if (FAILED(hr) || !Equal(expected.data(), bundle.record.hash, 32)) {
+                aesKey.Clear();
+                AuditIncorrectPattern(sid, bundle.record.attempts);
+                return E_ACCESSDENIED;
+            }
         }
     } else {
         CopyMemory(aesKey.data(), bundle.key, 32);
@@ -515,6 +601,11 @@ HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password, BYTE* sub
 
     // Pattern matched successfully! Reset failure counter and lockout timer.
     bundle.record.attempts = 0; bundle.record.until = 0;
+    {
+        wchar_t text[160]{};
+        StringCchPrintfW(text, ARRAYSIZE(text), L"Pattern accepted for %s.", sid);
+        Audit(EVENTLOG_INFORMATION_TYPE, 2000, text);
+    }
 
     if (password) {
         // Generate one-shot submission token BEFORE decrypting password
@@ -568,8 +659,16 @@ HRESULT Disable(PCWSTR sid) noexcept {
     Key root, user; HRESULT hr = OpenUser(sid, root, user); if (FAILED(hr)) return hr;
     Bundle bundle; hr = Read(user, sid, bundle); if (FAILED(hr)) return hr;
     bundle.record.disabled = 1;
+    SecureZeroMemory(bundle.record.submission, sizeof(bundle.record.submission)); // Permanent: never auto-expires.
+    {
+        wchar_t text[200]{};
+        StringCchPrintfW(text, ARRAYSIZE(text), L"Pattern disabled for %s (Windows declined the stored credential, or an administrator request). Full-password refresh required.", sid);
+        Audit(EVENTLOG_WARNING_TYPE, 2002, text);
+    }
     return Save(user, bundle);
 }
+
+HRESULT LastRetireError() noexcept { return g_lastRetireError; }
 
 HRESULT QueryTpmMode(PCWSTR sid) noexcept {
     Lock lock; if (!lock.Acquire()) return E_ACCESSDENIED;

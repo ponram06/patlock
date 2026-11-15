@@ -33,7 +33,8 @@ enum TimerId : UINT_PTR {
     kTimerTooShort   = 5,    // clear 'too short' message (1000ms)
     kTimerRetry      = 6,    // wrong-pattern / lockout clear
     kTimerStart      = 7,    // hover-to-start arm delay
-    kTimerPoll       = 8     // cursor position poll (30ms)
+    kTimerPoll       = 8,    // cursor position poll (30ms)
+    kTimerAnim       = 9     // dot grow / shake / trail fade animation (16ms, only while animating)
 };
 
 // ── Timing Constants ─────────────────────────────────────────────────────────
@@ -42,6 +43,8 @@ constexpr UINT kWrongFlashMs = 800;
 constexpr UINT kTooShortFlashMs = 1000;
 constexpr UINT kInactivityTimeoutMs = 120000;
 constexpr UINT kCursorPollMs = 30;
+constexpr ULONGLONG kShakeMs = 380;   // wrong-pattern shake
+constexpr ULONGLONG kFadeMs = 240;    // trail fade-out after the finger lifts
 
 // ── Color Key for Transparent Window (non-high-contrast mode) ────────────────
 constexpr COLORREF TransparentKey = RGB(1, 1, 1);
@@ -77,6 +80,16 @@ constexpr int WindowH     = PatternLayout::Height;
 constexpr int GridSpacing = PatternLayout::Spacing;
 constexpr int GridTopY    = PatternLayout::Top;
 constexpr int HitRadius   = PatternLayout::HitRadius;
+
+// The credential-provider surface must keep the compact native PIN geometry.
+// Desktop enrollment gets its own roomy, self-contained card.
+constexpr int DesktopCardWidth = 360;
+constexpr int DesktopCardHeight = 410;
+constexpr int DesktopGridSpacing = 82;
+constexpr int DesktopGridTop = 134;
+constexpr int DesktopStatusTop = 350;
+constexpr int DesktopStatusHeight = 24;
+constexpr COLORREF DesktopCardBackground = RGB(248, 250, 252);
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -120,7 +133,38 @@ struct State {
     ULONG_PTR gdiplusToken = 0;
     bool finished = false;
     INT_PTR resultCode = IDCANCEL;
+    bool desktopCard = false;       // Enrollment on the desktop: opaque rounded card, not the see-through lock-screen overlay.
+    // Animation state (all drawn in WM_PAINT; the 16 ms timer only runs while needed).
+    float grow[9]{};                // 0 = idle, 1 = fully "touched" per dot
+    ULONGLONG shakeStart = 0;       // wrong-pattern shake start tick (0 = off)
+    Pattern fadePattern;            // trail that is currently fading out
+    ULONGLONG fadeStart = 0;
+    bool fadeRed = false;
 };
+
+int ContentWidth(const State& state) noexcept {
+    return state.desktopCard ? DesktopCardWidth : WindowW;
+}
+
+int ContentHeight(const State& state) noexcept {
+    return state.desktopCard ? DesktopCardHeight : WindowH;
+}
+
+int ContentGridSpacing(const State& state) noexcept {
+    return state.desktopCard ? DesktopGridSpacing : GridSpacing;
+}
+
+int ContentGridTop(const State& state) noexcept {
+    return state.desktopCard ? DesktopGridTop : GridTopY;
+}
+
+int ContentStatusTop(const State& state) noexcept {
+    return state.desktopCard ? DesktopStatusTop : PatternLayout::StatusTop;
+}
+
+int ContentStatusHeight(const State& state) noexcept {
+    return state.desktopCard ? DesktopStatusHeight : PatternLayout::StatusHeight;
+}
 
 // The window is modeless: it must never run its own message loop inside LogonUI,
 // or LogonUI cannot process clicks on "Sign-in options" / the user list. Every
@@ -128,6 +172,9 @@ struct State {
 constexpr UINT kMsgEnd = WM_APP + 1;
 void EndPattern(HWND window, INT_PTR code) noexcept {
     if (window) PostMessageW(window, kMsgEnd, static_cast<WPARAM>(code), 0);
+}
+void StartAnim(HWND window) noexcept {
+    SetTimer(window, kTimerAnim, 16, nullptr); // Re-arming an existing timer is harmless.
 }
 // The currently open pattern dialog, so the provider can close it when LogonUI
 // deselects the tile (user clicked "Sign-in options" or another user).
@@ -247,13 +294,16 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
     const RECT area = monitor.rcWork;
     const int width = area.right - area.left;
     const int height = area.bottom - area.top;
+    const int contentWidth = ContentWidth(state);
+    const int contentHeight = ContentHeight(state);
     state.scale = (std::min)(static_cast<double>(dpi) / 96.0,
-        (std::min)(static_cast<double>(width - 16) / WindowW, static_cast<double>(height - 16) / WindowH));
+        (std::min)(static_cast<double>(width - 16) / contentWidth, static_cast<double>(height - 16) / contentHeight));
     if (state.scale < 0.5) return false; // Decline when controls cannot remain usable.
-    const int w = static_cast<int>(WindowW * state.scale);
-    const int h = static_cast<int>(WindowH * state.scale);
+    const int w = static_cast<int>(contentWidth * state.scale);
+    const int h = static_cast<int>(contentHeight * state.scale);
     int preferredX = area.left + (width - w) / 2;
-    int preferredY = area.top + height / 2 + static_cast<int>(PatternLayout::FallbackCenterOffset * state.scale);
+    int preferredY = state.desktopCard ? area.top + (height - h) / 2
+        : area.top + height / 2 + static_cast<int>(PatternLayout::FallbackCenterOffset * state.scale);
     if (state.hasAnchor) {
         // Center under the native username and start just below it, exactly
         // where LogonUI places its own PIN box.
@@ -267,8 +317,8 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
     contrast.cbSize = sizeof(contrast);
     if (!SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0)) return false;
     state.highContrast = (contrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
-    HBRUSH brush = CreateSolidBrush(state.highContrast ? GetSysColor(COLOR_WINDOW) : TransparentKey);
-    HFONT font = CreateFontW(-static_cast<int>(16 * state.scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    HBRUSH brush = CreateSolidBrush(state.highContrast ? GetSysColor(COLOR_WINDOW) : (state.desktopCard ? DesktopCardBackground : TransparentKey));
+    HFONT font = CreateFontW(-static_cast<int>(15 * state.scale), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     if (!brush || !font) { if (brush) DeleteObject(brush); if (font) DeleteObject(font); return false; }
     SendMessageW(state.fallback, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
@@ -279,12 +329,16 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
     state.background = brush;
     auto scaled = [&state](int value) { return static_cast<int>(value * state.scale); };
     if (!SetWindowPos(window, HWND_TOP, x, y, w, h, SWP_NOACTIVATE) ||
-        !MoveWindow(state.status, scaled(20), scaled(PatternLayout::StatusTop), scaled(WindowW - 40), scaled(PatternLayout::StatusHeight), TRUE) ||
+        !MoveWindow(state.status, scaled(20), scaled(ContentStatusTop(state)), scaled(contentWidth - 40), scaled(ContentStatusHeight(state)), TRUE) ||
         !MoveWindow(state.fallback, 0, 0, 0, 0, FALSE)) return false; // Hidden: native "Sign-in options" replaces it.
     // Only the margin is color-key transparent. An opaque panel keeps text
     // readable and prevents LogonUI account text showing through the controls.
-    if (!SetLayeredWindowAttributes(window, TransparentKey, state.highContrast ? 255 : 0,
-        state.highContrast ? LWA_ALPHA : LWA_COLORKEY)) return false;
+    const bool opaque = state.highContrast || state.desktopCard;
+    if (!SetLayeredWindowAttributes(window, TransparentKey, opaque ? 255 : 0, opaque ? LWA_ALPHA : LWA_COLORKEY)) return false;
+    if (state.desktopCard) {
+        HRGN region = CreateRoundRectRgn(0, 0, w + 1, h + 1, scaled(56), scaled(56));
+        if (region && !SetWindowRgn(window, region, TRUE)) DeleteObject(region);
+    }
     InvalidateRect(window, nullptr, TRUE);
     return true;
 }
@@ -299,10 +353,14 @@ struct Layout {
 Layout Grid(HWND window) noexcept {
     RECT r{};
     GetClientRect(window, &r);
+    const auto* state = reinterpret_cast<const State*>(GetWindowLongPtrW(window, DWLP_USER));
+    const int contentWidth = state ? ContentWidth(*state) : WindowW;
+    const int spacingLogical = state ? ContentGridSpacing(*state) : GridSpacing;
+    const int topLogical = state ? ContentGridTop(*state) : GridTopY;
     const int cw = static_cast<int>(r.right);
-    const double scale = static_cast<double>(cw) / WindowW;
-    const int spacing = static_cast<int>(GridSpacing * scale);
-    return {cw / 2 - spacing, static_cast<int>(GridTopY * scale), spacing, static_cast<int>(HitRadius * scale)};
+    const double scale = static_cast<double>(cw) / contentWidth;
+    const int spacing = static_cast<int>(spacingLogical * scale);
+    return {cw / 2 - spacing, static_cast<int>(topLogical * scale), spacing, static_cast<int>(HitRadius * scale)};
 }
 
 POINT Dot(Layout grid, int dot) noexcept {
@@ -353,7 +411,8 @@ bool RefreshRetry(HWND window, State& state) noexcept {
         try { hr = state.retryDelay(&state.retrySeconds); }
         catch (...) { state.pattern.Clear(); EndPattern(window, -1); return false; }
         if (hr == S_OK) state.passwordRequired = false;
-        else if (hr != E_ACCESSDENIED) { state.pattern.Clear(); EndPattern(window, -1); return false; }
+        // Any other failure (not enrolled, pattern disabled, stale password) keeps
+        // passwordRequired = true: the grid stays up and shows a quiet status line.
     }
     return true;
 }
@@ -364,6 +423,12 @@ void ResetStroke(HWND window, State& state) noexcept {
     KillTimer(window, kTimerTooShort);
     KillTimer(window, kTimerRetry);
     KillTimer(window, kTimerStart);
+    if (!state.hide && state.pattern.count > 1 && state.visual != VisualState::Success) {
+        state.fadePattern = state.pattern;
+        state.fadeStart = GetTickCount64();
+        state.fadeRed = state.visual == VisualState::ErrorWrong || state.visual == VisualState::ErrorTooShort;
+        StartAnim(window);
+    }
     state.pattern.Clear();
     state.dragging = false;
     state.hoverStroke = false;
@@ -444,12 +509,16 @@ void FinishPattern(HWND window, State& state) noexcept {
         } else if (result == VerifyResult::Lockout) {
             state.visual = VisualState::ErrorLockout;
             state.pattern.Clear();
+            state.shakeStart = GetTickCount64();
+            StartAnim(window);
             if (!RefreshRetry(window, state)) return;
             UpdateStatus(window, state);
             if (!state.passwordRequired && !SetTimer(window, kTimerRetry, 1000, nullptr)) EndPattern(window, -1);
         } else {
             // Wrong pattern: flash red for 800ms, then reset stroke for instant retry
             state.visual = VisualState::ErrorWrong;
+            state.shakeStart = GetTickCount64();
+            StartAnim(window);
             UpdateStatus(window, state);
             if (!SetTimer(window, kTimerRetry, kWrongFlashMs, nullptr)) { state.pattern.Clear(); EndPattern(window, -1); }
         }
@@ -546,6 +615,26 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
 
     switch (message) {
     case WM_TIMER:
+        if (wp == kTimerAnim) {
+            const ULONGLONG now = GetTickCount64();
+            bool active = false;
+            for (int i = 0; i < 9; ++i) {
+                const bool visited = !state->hide && state->pattern.Contains(static_cast<BYTE>(i));
+                const bool hovered = !visited && state->hoverDot == i && state->visual == VisualState::Drawing;
+                const float target = visited ? 1.0f : (hovered ? 0.5f : 0.0f);
+                float& grow = state->grow[i];
+                grow += (target - grow) * 0.35f;
+                if (std::fabs(target - grow) < 0.01f) grow = target; else active = true;
+            }
+            if (state->shakeStart) { if (now - state->shakeStart < kShakeMs) active = true; else state->shakeStart = 0; }
+            if (state->fadeStart) {
+                if (now - state->fadeStart < kFadeMs) active = true;
+                else { state->fadeStart = 0; state->fadePattern.Clear(); }
+            }
+            if (!active) KillTimer(window, kTimerAnim);
+            InvalidateRect(window, nullptr, FALSE);
+            return TRUE;
+        }
         if (wp == kTimerPoll) {
             // Color-keyed transparent areas pass mouse messages through. Sample
             // actual cursor movement so generous hit targets still work there.
@@ -664,7 +753,8 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
     case WM_DESTROY:
         if (state->font) { DeleteObject(state->font); state->font = nullptr; }
         if (state->background) { DeleteObject(state->background); state->background = nullptr; }
-        for (UINT_PTR id = 1; id <= 8; ++id) KillTimer(window, id);
+        for (UINT_PTR id = 1; id <= 9; ++id) KillTimer(window, id);
+        state->fadePattern.Clear();
         return TRUE;
 
     case WM_ERASEBKGND:
@@ -843,7 +933,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         HDC hdc = BeginPaint(window, &paint);
         RECT physical{};
         GetClientRect(window, &physical);
-        RECT rect{0, 0, WindowW, WindowH};
+        RECT rect{0, 0, ContentWidth(*state), ContentHeight(*state)};
 
         // Double buffer
         HDC memDC = CreateCompatibleDC(hdc);
@@ -861,7 +951,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         }
 
         // 1) Fill outside with TransparentKey (outer margin)
-        HBRUSH keyBrush = CreateSolidBrush(state->highContrast ? GetSysColor(COLOR_WINDOW) : TransparentKey);
+        HBRUSH keyBrush = CreateSolidBrush(state->highContrast ? GetSysColor(COLOR_WINDOW) : (state->desktopCard ? DesktopCardBackground : TransparentKey));
         const bool filled = keyBrush && FillRect(memDC, &physical, keyBrush);
         if (keyBrush) DeleteObject(keyBrush);
         if (!filled) {
@@ -874,6 +964,12 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
             g.ScaleTransform(static_cast<float>(state->scale), static_cast<float>(state->scale));
             g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
             g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+            if (state->shakeStart) {
+                const double t = static_cast<double>(GetTickCount64() - state->shakeStart) / kShakeMs;
+                if (t >= 0.0 && t < 1.0) {
+                    g.TranslateTransform(static_cast<float>(9.0 * (1.0 - t) * std::sin(t * 6.0 * 3.141592653589793)), 0.0f);
+                }
+            }
 
             // Normal mode leaves the native account header and wallpaper visible.
             // Patlock renders only the grid and fallback action.
@@ -886,12 +982,37 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 g.DrawPath(&border, &cardPath);
             }
 
+            if (state->desktopCard && !state->highContrast) {
+                Gdiplus::GraphicsPath cardPath;
+                AddRoundedRect(cardPath, Gdiplus::RectF(1.0f, 1.0f, rect.right - 2.0f, rect.bottom - 2.0f), 28.0f);
+                Gdiplus::SolidBrush cardFill(Gdiplus::Color(255, 248, 250, 252));
+                g.FillPath(&cardFill, &cardPath);
+                Gdiplus::Pen cardBorder(Gdiplus::Color(255, 205, 213, 224), 1.5f);
+                g.DrawPath(&cardBorder, &cardPath);
+                Gdiplus::FontFamily family(L"Segoe UI");
+                Gdiplus::Font titleFont(&family, 13.5f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+                Gdiplus::Font detailFont(&family, 10.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+                Gdiplus::StringFormat center;
+                center.SetAlignment(Gdiplus::StringAlignmentCenter);
+                center.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+                Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 30, 41, 59));
+                Gdiplus::SolidBrush detailBrush(Gdiplus::Color(255, 87, 99, 117));
+                g.DrawString(L"Draw your pattern", -1, &titleFont, Gdiplus::RectF(0.0f, 30.0f, static_cast<float>(ContentWidth(*state)), 24.0f), &center, &titleBrush);
+                g.DrawString(L"Connect at least 5 dots", -1, &detailFont, Gdiplus::RectF(0.0f, 58.0f, static_cast<float>(ContentWidth(*state)), 18.0f), &center, &detailBrush);
+                Gdiplus::Pen divider(Gdiplus::Color(255, 225, 230, 237), 1.0f);
+                g.DrawLine(&divider, 40.0f, 94.5f, static_cast<float>(ContentWidth(*state) - 40), 94.5f);
+            }
+
             // ── Colors by state ──────────────────────────────────────────────
             const Gdiplus::Color accent = GetSystemAccentColor();
             Gdiplus::Color lineColor = accent;
             Gdiplus::Color ringColor = accent;
             Gdiplus::Color discBg(255, 12, 48, 96);
             Gdiplus::Color coreColor(255, 255, 255, 255);
+
+            if (state->desktopCard && !state->highContrast) {
+                discBg = Gdiplus::Color(255, 226, 239, 253);
+            }
 
             if (state->visual == VisualState::Success) {
                 lineColor = ringColor = Gdiplus::Color(255, 46, 213, 115);
@@ -905,10 +1026,11 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 coreColor = Palette(*state, coreColor, COLOR_HIGHLIGHTTEXT);
                 discBg = Palette(*state, discBg, COLOR_HIGHLIGHT);
             }
-            const Layout grid{WindowW / 2 - GridSpacing, GridTopY, GridSpacing, HitRadius};
+            const int gridSpacing = ContentGridSpacing(*state);
+            const Layout grid{ContentWidth(*state) / 2 - gridSpacing, ContentGridTop(*state), gridSpacing, HitRadius};
 
             // ── Anti-Aliased Connecting Lines with Rounded Caps ──────────────
-            Gdiplus::Pen linePen(lineColor, 4.0f);
+            Gdiplus::Pen linePen(lineColor, 3.0f);
             linePen.SetStartCap(Gdiplus::LineCapRound);
             linePen.SetEndCap(Gdiplus::LineCapRound);
             linePen.SetLineJoin(Gdiplus::LineJoinRound);
@@ -925,45 +1047,72 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 }
             }
 
+            if (state->fadeStart && state->fadePattern.count > 1) {
+                const float t = static_cast<float>(std::min<ULONGLONG>(kFadeMs, GetTickCount64() - state->fadeStart)) / kFadeMs;
+                const float width = 3.0f * (1.0f - t);
+                if (width > 0.3f) {
+                    Gdiplus::Pen fadePen(state->fadeRed ? Gdiplus::Color(255, 255, 75, 75) : accent, width);
+                    fadePen.SetStartCap(Gdiplus::LineCapRound);
+                    fadePen.SetEndCap(Gdiplus::LineCapRound);
+                    for (size_t i = 1; i < state->fadePattern.count; ++i) {
+                        const POINT p1 = Dot(grid, state->fadePattern.dots[i - 1]);
+                        const POINT p2 = Dot(grid, state->fadePattern.dots[i]);
+                        g.DrawLine(&fadePen, p1.x, p1.y, p2.x, p2.y);
+                    }
+                }
+            }
+
             // Draw the nine dots.
+            bool animating = false;
             for (BYTE i = 0; i < 9; ++i) {
                 const POINT p = Dot(grid, i);
                 const bool visited = !state->hide && state->pattern.Contains(i);
                 const bool hovered = (!visited && state->hoverDot == i && state->visual == VisualState::Drawing);
+                const float target = visited ? 1.0f : (hovered ? 0.5f : 0.0f);
+                if (std::fabs(target - state->grow[i]) > 0.005f) animating = true;
+                const float grow = state->grow[i];
 
                 if (visited) {
                     // Connected dot: outer ring + inner core
-                    float rOut = 14.0f;
+                    const float rOut = 9.0f + 3.5f * grow;
                     Gdiplus::SolidBrush db(discBg);
                     g.FillEllipse(&db, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
-                    Gdiplus::Pen rp(ringColor, 2.5f);
+                    Gdiplus::Pen rp(ringColor, 2.0f);
                     g.DrawEllipse(&rp, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
 
-                    float rIn = 5.5f;
+                    const float rIn = 3.0f + 1.5f * grow;
                     Gdiplus::SolidBrush cb(coreColor);
                     g.FillEllipse(&cb, p.x - rIn, p.y - rIn, 2.0f * rIn, 2.0f * rIn);
-                } else if (hovered) {
-                    // Hovered dot: cyan accent ring
-                    float rOut = 13.5f;
-                    Gdiplus::SolidBrush db(Palette(*state, Gdiplus::Color(255, 18, 48, 88), COLOR_WINDOW));
+                } else if (hovered || grow > 0.02f) {
+                    // Hovered dot: a restrained accent halo on the light card.
+                    const float rOut = 8.5f + 3.5f * grow;
+                    const Gdiplus::Color hoverFill = state->desktopCard
+                        ? Gdiplus::Color(255, 226, 239, 253) : Gdiplus::Color(255, 18, 48, 88);
+                    Gdiplus::SolidBrush db(Palette(*state, hoverFill, COLOR_WINDOW));
                     g.FillEllipse(&db, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
-                    Gdiplus::Pen hp(Palette(*state, Gdiplus::Color(255, 0, 160, 255), COLOR_HIGHLIGHT), 2.0f);
+                    Gdiplus::Pen hp(Palette(*state, Gdiplus::Color(255, 0, 160, 255), COLOR_HIGHLIGHT), 1.75f);
                     g.DrawEllipse(&hp, p.x - rOut, p.y - rOut, 2.0f * rOut, 2.0f * rOut);
 
-                    float rIn = 4.5f;
+                    const float rIn = 3.0f + grow;
                     Gdiplus::SolidBrush cb(Palette(*state, Gdiplus::Color(255, 210, 235, 255), COLOR_WINDOWTEXT));
                     g.FillEllipse(&cb, p.x - rIn, p.y - rIn, 2.0f * rIn, 2.0f * rIn);
                 } else {
-                    // Quiet solid dots, with a fine light edge for dark wallpapers.
-                    float r = 14.0f;
-                    Gdiplus::SolidBrush dotBrush(Palette(*state, Gdiplus::Color(255, 10, 14, 20), COLOR_WINDOW));
+                    // The desktop card uses calm outlined targets; lock-screen dots
+                    // retain their high-contrast dark fill for wallpaper visibility.
+                    const float r = 8.5f;
+                    const Gdiplus::Color idleFill = state->desktopCard
+                        ? Gdiplus::Color(255, 255, 255, 255) : Gdiplus::Color(255, 14, 18, 28);
+                    const Gdiplus::Color idleRim = state->desktopCard
+                        ? Gdiplus::Color(255, 100, 116, 139) : Gdiplus::Color(255, 236, 241, 248);
+                    Gdiplus::SolidBrush dotBrush(Palette(*state, idleFill, COLOR_WINDOW));
                     g.FillEllipse(&dotBrush, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
 
-                    Gdiplus::Pen dotRim(Palette(*state, Gdiplus::Color(160, 150, 165, 185), COLOR_WINDOWTEXT), 1.0f);
+                    Gdiplus::Pen dotRim(Palette(*state, idleRim, COLOR_WINDOWTEXT), 1.5f);
                     g.DrawEllipse(&dotRim, p.x - r, p.y - r, 2.0f * r, 2.0f * r);
 
                 }
             }
+            if (animating) StartAnim(window);
 
         }
 
@@ -1010,7 +1159,16 @@ HRESULT ShowPatternWindow(
         Gdiplus::GdiplusShutdown(gdiplusToken);
         return E_OUTOFMEMORY;
     }
+    state->desktopCard = (owner == nullptr);
     state->hasAnchor = FindUsernameAnchor(owner, anchorName, &state->anchor);
+    if (anchorName && *anchorName && !state->hasAnchor) {
+        // The username is not on screen: LogonUI is still showing the lock cover
+        // (clock screen) or is mid-transition. Do not float a grid over it.
+        state->onDone = nullptr;
+        delete state;
+        Gdiplus::GdiplusShutdown(gdiplusToken);
+        return HRESULT_FROM_WIN32(ERROR_NOT_READY);
+    }
 
     alignas(DWORD) BYTE buffer[sizeof(DLGTEMPLATE) + 3 * sizeof(WORD)]{};
     auto* dialog = reinterpret_cast<DLGTEMPLATE*>(buffer);
@@ -1060,6 +1218,11 @@ HRESULT DrawPatternInteractive(
 
 void CloseActivePatternWindow() noexcept {
     if (HWND window = g_activeWindow.load()) PostMessageW(window, WM_CLOSE, 0, 0);
+}
+
+bool IsUsernameVisible(HWND owner, const wchar_t* name) noexcept {
+    RECT rect{};
+    return FindUsernameAnchor(owner, name, &rect);
 }
 
 HRESULT DrawPattern(HINSTANCE instance, HWND owner, bool hideTrail, Pattern& output) noexcept {

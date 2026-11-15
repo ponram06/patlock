@@ -20,9 +20,10 @@ HRESULT HashPattern(const Pattern& pattern, const BYTE salt[16], BYTE hash[32]) 
 HRESULT DeriveTpmAuthorization(const Pattern& pattern, const BYTE salt[16], BYTE auth[32]) noexcept;
 // Account must be an unqualified local username; SID comes from the verified token.
 HRESULT ValidatePassword(PCWSTR user, PCWSTR password, wchar_t (&sid)[184]) noexcept;
-// Without a TPM, enrollment fails with ERROR_NOT_SUPPORTED unless allowSoftwareKey
-// is true, because software-only storage keeps the key beside the ciphertext.
-HRESULT Enroll(PCWSTR user, PCWSTR sid, PCWSTR password, const Pattern& pattern, bool allowSoftwareKey) noexcept;
+// Without a TPM, enrollment fails with ERROR_NOT_SUPPORTED unless the
+// HKLM\SOFTWARE\Policies\Patlock AllowSoftwareKey policy is 1, because software-only
+// storage keeps the key beside the ciphertext.
+HRESULT Enroll(PCWSTR user, PCWSTR sid, PCWSTR password, const Pattern& pattern) noexcept;
 HRESULT Refresh(PCWSTR user, PCWSTR sid, PCWSTR password) noexcept;
 HRESULT RemoveEnrollment(PCWSTR user, PCWSTR sid, PCWSTR password) noexcept;
 HRESULT Verify(PCWSTR sid, const Pattern& pattern, Password* password = nullptr, BYTE* submission = nullptr) noexcept;
@@ -35,6 +36,7 @@ HRESULT QueryRetryAfter(PCWSTR sid, DWORD* seconds) noexcept;
 // Query whether the record for a SID uses TPM-backed key storage.
 // Returns S_OK if TPM mode, S_FALSE if baseline, or failure if no record.
 HRESULT QueryTpmMode(PCWSTR sid) noexcept;
+HRESULT LastRetireError() noexcept; // HRESULT of the last failed old-TPM-key retirement in Enroll.
 // Pure policy helpers, also used by VM tests. Seconds and failure counts only.
 DWORD LockoutSeconds(DWORD attempts) noexcept;
 }

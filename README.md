@@ -23,7 +23,8 @@ Patlock comprises four core components:
 1. **Credential Provider DLL (`PatlockProvider.dll`)**:
    - Implements `ICredentialProvider` and `ICredentialProviderCredential2`.
    - Adds a distinct "Pattern" tile to LogonUI beside the built-in Password and PIN tiles.
-   - Invokes the modal pattern-drawing dialog via LogonUI's `OnCreatingWindow` callback.
+   - Opens a modeless pattern-drawing surface while LogonUI continues to process
+     Password, PIN, user-switching and Sign-in-options interactions.
    - Verifies pattern hashes, manages attempt counters, checks lockout delays, and packages serialized credentials.
    - Never filters, replaces, or alters built-in Windows credential providers.
 
@@ -57,12 +58,14 @@ Patlock comprises four core components:
   - Minimum 5 dots required.
   - Escalating lockout delays: 5 wrong attempts -> 30s; 6 -> 1 min; 7 -> 5 min; 8-9 -> 15 min; 10 wrong attempts permanently disables Pattern sign-in until full password re-verification.
   - Attempt reservations are committed in registry transactions before verification (a crash can consume an attempt).
-- **Dual-Mode Storage (TPM 2.0 Hardened + Baseline Fallback)**:
+- **TPM-backed storage by default**:
   - **TPM Mode**: the Platform Crypto Provider wraps the AES key using RSA-OAEP
     SHA-256 and receives a separate pattern-derived authorization through its
     UTF-16 PIN property. See [TPM validation](docs/TPM_VALIDATION.md): wrong-auth
     rejection and hardware anti-hammering still require VM/hardware evidence.
-  - **Baseline Mode**: If no TPM is available (or in virtual machines without virtual TPM), Patlock generates a random 256-bit AES key and stores it in `HKLM\SOFTWARE\Patlock\<SID>\Record` protected by SYSTEM- and Administrators-only DACLs. The key sits beside the ciphertext, so any administrator, or anyone reading the disk without BitLocker, can recover the password. Enrollment asks for explicit consent before using this mode.
+  - A software-key record is refused by default because an administrator able to
+    read the registry can recover its key. It is available only when an
+    administrator explicitly sets `AllowSoftwareKey=1` on a throwaway test VM.
 - **Boot Availability and Escalating Lockout (Option A)**:
   - Pattern unlock remains available across reboots, matching Windows Hello PIN convenience.
   - Brute-force attacks are constrained by durable escalating lockout (30s at 5 attempts, escalating to 1m, 5m, 15m; disabled after 10 attempts).
@@ -71,8 +74,10 @@ Patlock comprises four core components:
   - Any error, corrupt record, clock rollback, or TPM fault immediately declines the tile.
   - Patlock never filters or alters the built-in Password tile. Verify its
     continued operation in every failure/recovery acceptance case.
-- **No Secrets in Logs**:
-  - Provider logging is restricted to a fixed lifecycle status string (`sample: enumeration requested`). No passwords, patterns, hashes, or user identities are ever written to disk logs.
+- **No secrets in logs**:
+  - Application Event Log entries record only SIDs, counters and HRESULTs for
+    enrollment, accepted/incorrect patterns, lockouts, disablement and TPM-key
+    retirement. They never record patterns, passwords, keys or hashes.
 - **Memory Hygiene**:
   - Sensitive buffers are wrapped in `patlock::Secret` RAII containers and wiped with `SecureZeroMemory` immediately after use.
   - Hash and MAC comparisons are performed in constant time (`patlock::Equal`).
@@ -110,19 +115,21 @@ These are test targets, not recorded passes. The guarded combined VM command is
 
 ---
 
-## Installation & Testing in a Windows 11 VM
+## Release, Installation & Testing in a Windows 11 VM
 
 All lock-screen testing should be performed inside a Windows 11 VMware Workstation Pro virtual machine.
 
 1. **Take a VM Snapshot** before installing anything.
 2. Ensure a second administrator account exists with a known password.
-3. In elevated PowerShell inside the VM:
+3. Build, test and package in elevated Developer PowerShell inside the VM:
    ```powershell
-   .\install\install.ps1 -DllPath .\build\Release\PatlockProvider.dll -AcknowledgeVm -SnapshotAndPasswordFallbackVerified
+   .\install\Build-Release.ps1 -CertThumbprint <certificate-SHA1>
+   Expand-Archive .\dist\Patlock-Release.zip .\dist\Patlock-Release
+   .\dist\Patlock-Release\Install.cmd
    ```
 4. **Enroll your local account**:
    ```powershell
-   .\build\Release\patlock_enroll.exe
+   & "$env:ProgramFiles\Patlock\patlock_enroll.exe"
    ```
    Enter your local account credentials and draw your 5+ dot pattern twice.
 5. **Lock the workstation**:
@@ -131,20 +138,14 @@ All lock-screen testing should be performed inside a Windows 11 VMware Workstati
    second after at least five dots to submit. Windows performs actual authentication.
 6. **Uninstall cleanly**:
    ```powershell
-   .\install\uninstall.ps1 -AcknowledgeVm
+   .\dist\Patlock-Release\Uninstall.cmd
    ```
 
 ---
 
-## Packaging
-
-To produce a self-contained distribution package:
-```powershell
-.\install\package.ps1 -Configuration Release
-```
-Outputs:
-- `dist\Patlock\`: Standalone deployment folder.
-- `dist\Patlock-Release.zip`: Compressed distribution archive.
+See [production deployment](docs/PRODUCTION.md) for upgrade, signature,
+uninstall, Safe Mode recovery and release-gate requirements. Never distribute
+an unsigned or VM-unverified build.
 
 ---
 

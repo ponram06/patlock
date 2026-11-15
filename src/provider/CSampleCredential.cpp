@@ -535,12 +535,16 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID) try
     HWND owner = nullptr;
     HRESULT hr = _pCredProvCredentialEvents->OnCreatingWindow(&owner);
     if (FAILED(hr) || !owner) return E_FAIL;
-    _pattern.Clear();
-    DWORD retrySeconds = 0;
-    if (!_fIsLocalUser || FAILED(patlock::QueryRetryAfter(_pszUserSid, &retrySeconds))) {
-        MessageBoxW(owner, L"Pattern unavailable. Use Password, then run Patlock password refresh or re-enroll.", L"Pattern", MB_OK | MB_ICONWARNING);
+    if (_pszDisplayName && !patlock::IsUsernameVisible(owner, _pszDisplayName)) {
+        // The lock cover (clock screen) is still showing, not the sign-in view.
+        // Show nothing and check again shortly; never verify or warn from here.
+        if (_launchTimerId) KillTimer(nullptr, _launchTimerId);
+        _launchTimerId = SetTimer(nullptr, 0, 600, AutoLaunchTimerCallback);
         return S_OK;
     }
+    _pattern.Clear();
+    // No pop-up: when the pattern is unavailable (not enrolled, disabled, stale
+    // password) the grid opens and shows a quiet status line instead.
 
     // The window is modeless: this call returns immediately and the result arrives
     // later in the completion callback below. A nested modal loop here blocks
@@ -613,11 +617,17 @@ HRESULT CSampleCredential::CommandLinkClicked(DWORD dwFieldID) try
     _dialogOpen = true;
     AddRef();
     hr = patlock::ShowPatternWindow(HINST_THISDLL, owner, _fChecked != FALSE, verifier,
-        [this](DWORD* seconds) { return patlock::QueryRetryAfter(_pszUserSid, seconds); },
+        [this](DWORD* seconds) { return _fIsLocalUser ? patlock::QueryRetryAfter(_pszUserSid, seconds) : E_ACCESSDENIED; },
         _pszDisplayName, finished);
     if (FAILED(hr)) {
         _dialogOpen = false;
         Release();
+        if (hr == HRESULT_FROM_WIN32(ERROR_NOT_READY)) {
+            // Username vanished between the check and the window: try again.
+            if (_launchTimerId) KillTimer(nullptr, _launchTimerId);
+            _launchTimerId = SetTimer(nullptr, 0, 600, AutoLaunchTimerCallback);
+            return S_OK;
+        }
         return hr;
     }
     return S_OK;
@@ -752,6 +762,15 @@ HRESULT CSampleCredential::GetSerialization(_Out_ CREDENTIAL_PROVIDER_GET_SERIAL
                 hr = E_OUTOFMEMORY;
             }
         }
+    }
+    if (SUCCEEDED(hr) && *pcpgsr == CPGSR_RETURN_CREDENTIAL_FINISHED && _fIsLocalUser)
+    {
+        // Hand-off to Windows is done. LogonUI exits on success and does not
+        // reliably call ReportResult first, so waiting for it left the record
+        // disabled after every successful unlock ("Pattern unavailable" next
+        // time). Clear the one-shot guard now; a failure report still calls
+        // Disable() in ReportResult, so a rejected credential stays blocked.
+        patlock::FinishSubmission(_pszUserSid, _submission.data());
     }
     if (FAILED(hr) && pcpcs->rgbSerialization)
     {
