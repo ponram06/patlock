@@ -751,7 +751,7 @@ bool PaintSurface(Gdiplus::Graphics& g, const State& state) noexcept {
         else if (grow > 0.02f) halo = card ? Gdiplus::Color(255, 226, 232, 240) : Gdiplus::Color(64, 255, 255, 255);
         FillCircle(g, halo, p, 15.0f + 9.0f * grow);
         const float coreRadius = (visited ? 7.0f : 5.5f) + 1.5f * grow;
-        FillCircle(g, shadow, Gdiplus::PointF(p.X, p.Y + 1.0f), coreRadius + 1.5f);
+        FillCircle(g, shadow, p, coreRadius + 1.5f); // Concentric: an even outline, not an offset shadow.
         const Gdiplus::Color core = visited ? tint
             : (card ? Gdiplus::Color(255, 100, 116, 139) : Gdiplus::Color(240, 255, 255, 255));
         FillCircle(g, core, p, coreRadius);
