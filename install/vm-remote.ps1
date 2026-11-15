@@ -5,6 +5,8 @@
 # One-time setup (host PowerShell; a throwaway VM admin account, never your real password):
 #   [Environment]::SetEnvironmentVariable('PATLOCK_VM_USER', 'admin2', 'User')
 #   [Environment]::SetEnvironmentVariable('PATLOCK_VM_PASS', '<that account password>', 'User')
+# If the VM is encrypted (VMware requires that for a virtual TPM), also:
+#   [Environment]::SetEnvironmentVariable('PATLOCK_VM_ENCRYPTION_PASS', '<VMware encryption password>', 'User')
 # Then restart the terminal / VS Code.
 [CmdletBinding()]
 param(
@@ -24,9 +26,11 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 $user = [Environment]::GetEnvironmentVariable('PATLOCK_VM_USER', 'User')
 $pass = [Environment]::GetEnvironmentVariable('PATLOCK_VM_PASS', 'User')
+$vmPass = [Environment]::GetEnvironmentVariable('PATLOCK_VM_ENCRYPTION_PASS', 'User')
+$vmAuth = @(); if ($vmPass) { $vmAuth = @('-vp', $vmPass) }
 function Guest([string[]]$arguments) {
     if (-not $user -or -not $pass) { throw 'Set PATLOCK_VM_USER and PATLOCK_VM_PASS first (see the top of this script).' }
-    & $vmrun -T ws -gu $user -gp $pass @arguments
+    & $vmrun -T ws @vmAuth -gu $user -gp $pass @arguments
     if ($LASTEXITCODE) { throw "vmrun $($arguments[0]) failed (exit $LASTEXITCODE)." }
 }
 function GuestPowerShell([string]$command, [string]$logName) {
