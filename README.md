@@ -4,8 +4,11 @@ Draw an Android-style 3x3 pattern with your trackpad or mouse to unlock Windows,
 instead of typing a password or PIN.
 
 <p align="center">
-  <img src="docs/media/demo-unlock.gif" alt="Drawing a pattern on the Windows lock screen unlocks the PC" width="360">
+  <img src="docs/media/demo-unlock.gif" alt="Drawing a pattern on the Windows lock screen unlocks the PC" width="300">
 </p>
+
+<p align="center"><a href="docs/media/patlock-demo.mp4">Full demo video (38 s)</a>: lock, unlock with the
+pattern, switch to Password and back.</p>
 
 > [!WARNING]
 > **Experimental.** Patlock has been built and tested only inside a Windows 11 virtual
@@ -24,7 +27,7 @@ instead of typing a password or PIN.
 
 | Lock screen | Correct pattern |
 |---|---|
-| <img src="docs/media/lockscreen-175.png" alt="Pattern grid under the username" width="320"> | <img src="docs/media/accepted.png" alt="Pattern accepted in green" width="320"> |
+| <img src="docs/media/lockscreen.png" alt="Pattern grid under the username" width="320"> | <img src="docs/media/accepted.png" alt="Pattern accepted in green" width="320"> |
 
 ## How it protects the stored password
 - The Windows password is encrypted with AES-256-GCM. The key is wrapped by the **TPM**,
