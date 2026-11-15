@@ -252,7 +252,11 @@ void FindLimitBelow(IUIAutomation* uia, IUIAutomationElement* root, AnchorQuery&
         const RECT& name = query.rect;
         const LONG nameHeight = name.bottom - name.top;
         const LONG centerX = (name.left + name.right) / 2;
-        const LONG halfColumn = (std::max)(static_cast<LONG>(name.right - name.left), 4 * nameHeight);
+        // Only elements centred under the name. LogonUI reports the username as a
+        // wide element (929 px at 175% in the VM), so its width would also admit
+        // the user list on the left (761 px off centre); "Sign-in options" is
+        // within a few pixels of the centre.
+        const LONG halfColumn = 2 * nameHeight;
         int count = 0;
         items->get_Length(&count);
         LONG best = LONG_MAX;
@@ -1024,6 +1028,11 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
     }
     if (message == kMsgLimit) {
         const LONG limit = static_cast<LONG>(static_cast<ULONG>(wp));
+        // A reading that would need an implausibly small grid is ignored and never
+        // replaces a good one, so a transient element cannot make the grid jump.
+        const double room = static_cast<double>(limit - state->anchor.bottom) /
+            ((PatternLayout::AnchorGap + ContentHeight(*state)) * (GetDpiForWindow(window) / 96.0));
+        if (limit > 0 && room < 0.6) return TRUE;
         if (limit != state->limitTop) {
             state->limitTop = limit;
             if (!state->dragging && !Configure(window, *state, GetDpiForWindow(window), nullptr)) EndPattern(window, -1);
