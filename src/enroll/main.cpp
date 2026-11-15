@@ -46,10 +46,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int) {
         patlock::Pattern first, second;
         hr = patlock::DrawPattern(instance, nullptr, false, first);
         if (hr != S_OK) return FAILED(hr) ? 1 : 0;
-        MessageBoxW(nullptr, L"Draw the same pattern again to confirm it.", L"Patlock", MB_OK);
-        hr = patlock::DrawPattern(instance, nullptr, false, second);
-        if (hr != S_OK) return FAILED(hr) ? 1 : 0;
-        if (first.count != second.count || !patlock::Equal(first.dots.data(), second.dots.data(), first.count)) hr = E_INVALIDARG;
+        // A mismatched confirmation is retried here, so the user does not have
+        // to start over (elevation prompt and password) after one slip.
+        for (int attempt = 0;; ++attempt) {
+            MessageBoxW(nullptr, attempt == 0 ? L"Draw the same pattern again to confirm it."
+                : L"That did not match the first pattern. Draw it again to confirm.",
+                L"Patlock", MB_OK | (attempt == 0 ? 0 : MB_ICONWARNING));
+            second.Clear();
+            hr = patlock::DrawPattern(instance, nullptr, false, second);
+            if (hr != S_OK) { first.Clear(); return FAILED(hr) ? 1 : 0; }
+            if (first.count == second.count && patlock::Equal(first.dots.data(), second.dots.data(), first.count)) break;
+            if (attempt == 2) { hr = E_INVALIDARG; break; }
+        }
         if (SUCCEEDED(hr)) hr = patlock::Enroll(cleanUser, sid, password.data(), first);
     }
     password.Clear();

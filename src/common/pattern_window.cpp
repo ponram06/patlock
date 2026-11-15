@@ -42,6 +42,8 @@ constexpr UINT_PTR kLastTimer = kTimerAnchor;
 
 // ── Timing Constants ─────────────────────────────────────────────────────────
 constexpr UINT kSuccessFlashMs = 160;
+constexpr UINT kConfirmFlashMs = 320;   // enrollment: show the finished stroke before closing
+constexpr UINT kDesktopFinishDelayMs = 1000; // enrollment has no time pressure; avoid early submits
 constexpr UINT kWrongFlashMs = 800;
 constexpr UINT kTooShortFlashMs = 1000;
 constexpr UINT kInactivityTimeoutMs = 120000;
@@ -93,6 +95,7 @@ constexpr int DesktopGridSpacing = 82;
 constexpr int DesktopGridTop = 134;
 constexpr int DesktopStatusTop = 350;
 constexpr int DesktopStatusHeight = 24;
+constexpr int DesktopHitRadius = 34;   // Same share of the spacing as the lock screen (30 of 72).
 constexpr COLORREF DesktopCardBackground = RGB(248, 250, 252);
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -171,6 +174,14 @@ int ContentGridTop(const State& state) noexcept {
 
 int ContentStatusTop(const State& state) noexcept {
     return state.desktopCard ? DesktopStatusTop : PatternLayout::StatusTop;
+}
+
+int ContentHitRadius(const State& state) noexcept {
+    return state.desktopCard ? DesktopHitRadius : HitRadius;
+}
+
+UINT FinishDelay(const State& state) noexcept {
+    return state.desktopCard ? kDesktopFinishDelayMs : HoverPolicy::FinishDelayMs;
 }
 
 int ContentStatusHeight(const State& state) noexcept {
@@ -430,7 +441,8 @@ Layout Grid(HWND window) noexcept {
     const int cw = static_cast<int>(r.right);
     const double scale = static_cast<double>(cw) / contentWidth;
     const int spacing = static_cast<int>(spacingLogical * scale);
-    return {cw / 2 - spacing, static_cast<int>(topLogical * scale), spacing, static_cast<int>(HitRadius * scale)};
+    const int hitLogical = state ? ContentHitRadius(*state) : HitRadius;
+    return {cw / 2 - spacing, static_cast<int>(topLogical * scale), spacing, static_cast<int>(hitLogical * scale)};
 }
 
 POINT Dot(Layout grid, int dot) noexcept {
@@ -542,7 +554,7 @@ void ArmFinish(HWND window, State& state) noexcept {
     KillTimer(window, kTimerShort);
     state.finishDue = state.shortDue = 0;
     const bool valid = state.pattern.Valid();
-    const UINT delay = valid ? HoverPolicy::FinishDelayMs : HoverPolicy::ShortStrokeDelayMs;
+    const UINT delay = valid ? FinishDelay(state) : HoverPolicy::ShortStrokeDelayMs;
     (valid ? state.finishDue : state.shortDue) = GetTickCount64() + delay;
     if (!SetTimer(window, valid ? kTimerFinish : kTimerShort, delay, nullptr)) EndPattern(window, -1);
 }
@@ -600,9 +612,11 @@ void FinishPattern(HWND window, State& state) noexcept {
             if (!SetTimer(window, kTimerRetry, kWrongFlashMs, nullptr)) { state.pattern.Clear(); EndPattern(window, -1); }
         }
     } else {
+        // No verifier (enrollment): briefly show the completed stroke in green
+        // instead of the window vanishing the instant the last dot is reached.
         state.visual = VisualState::Success;
         UpdateStatus(window, state);
-        EndPattern(window, IDOK);
+        if (!SetTimer(window, kTimerSuccess, kConfirmFlashMs, nullptr)) EndPattern(window, IDOK);
     }
 }
 
@@ -1046,7 +1060,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 Track(window, *state, current);
                 state->finishAnchor = current;
                 const UINT_PTR timer = state->pattern.Valid() ? kTimerFinish : kTimerShort;
-                const UINT delay = state->pattern.Valid() ? HoverPolicy::FinishDelayMs : HoverPolicy::ShortStrokeDelayMs;
+                const UINT delay = state->pattern.Valid() ? FinishDelay(*state) : HoverPolicy::ShortStrokeDelayMs;
                 state->finishDue = state->shortDue = 0;
                 (timer == kTimerFinish ? state->finishDue : state->shortDue) = GetTickCount64() + delay;
                 if (!SetTimer(window, timer, delay, nullptr)) EndPattern(window, -1);
@@ -1157,7 +1171,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                     KillTimer(window, kTimerFinish); KillTimer(window, kTimerShort);
                     state->finishDue = state->shortDue = 0;
                     const UINT_PTR timer = state->pattern.Valid() ? kTimerFinish : kTimerShort;
-                    const UINT delay = state->pattern.Valid() ? HoverPolicy::FinishDelayMs : HoverPolicy::ShortStrokeDelayMs;
+                    const UINT delay = state->pattern.Valid() ? FinishDelay(*state) : HoverPolicy::ShortStrokeDelayMs;
                     (timer == kTimerFinish ? state->finishDue : state->shortDue) = GetTickCount64() + delay;
                     if (!SetTimer(window, timer, delay, nullptr)) { state->pattern.Clear(); EndPattern(window, -1); return TRUE; }
                 }
