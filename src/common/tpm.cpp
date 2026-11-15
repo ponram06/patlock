@@ -6,6 +6,7 @@
 #include <tbs.h>
 #include <sddl.h>
 #include <strsafe.h>
+#include <new>
 
 #pragma comment(lib, "ncrypt.lib")
 #pragma comment(lib, "tbs.lib")
@@ -32,7 +33,11 @@ struct KeyHandle {
     ~KeyHandle() { if (h) NCryptFreeObject(h); }
     HRESULT Delete() noexcept {
         if (!h) return S_OK;
-        const SECURITY_STATUS status = NCryptDeleteKey(h, NCRYPT_SILENT_FLAG);
+        SECURITY_STATUS status = NCryptDeleteKey(h, NCRYPT_SILENT_FLAG);
+        // Observed in the VM: the Platform Crypto Provider rejects NCRYPT_SILENT_FLAG
+        // on delete with NTE_BAD_FLAGS (0x80090009). The handle stays valid on
+        // failure, so retry with no flags (deleting a key needs no authorization UI).
+        if (status == NTE_BAD_FLAGS) status = NCryptDeleteKey(h, 0);
         if (status == ERROR_SUCCESS) h = 0;
         return Status(status);
     }
@@ -265,6 +270,43 @@ HRESULT DeleteKey(PCWSTR identity) noexcept {
     const HRESULT deleted = key.Delete();
     return (deleted == NTE_BAD_KEYSET || deleted == NTE_NOT_FOUND || deleted == NTE_NO_KEY ||
         deleted == NTE_BAD_KEY_STATE) ? S_FALSE : deleted;
+}
+
+HRESULT PurgeKeys(PCWSTR identityPrefix, PCWSTR keepIdentity) noexcept {
+    wchar_t prefix[kMaxKeyName]{}, keep[kMaxKeyName]{};
+    if (!MakeKeyName(identityPrefix, prefix)) return E_INVALIDARG;
+    if (keepIdentity && !MakeKeyName(keepIdentity, keep)) return E_INVALIDARG;
+    const size_t prefixLength = wcslen(prefix);
+    ProvHandle provider;
+    SECURITY_STATUS status = NCryptOpenStorageProvider(&provider.h, MS_PLATFORM_CRYPTO_PROVIDER, 0);
+    if (status != ERROR_SUCCESS) return Status(status);
+    // Collect names first; deleting while enumerating could disturb the enumeration.
+    constexpr size_t kMaxPurge = 64;
+    struct Names { wchar_t value[kMaxPurge][kMaxKeyName]; };
+    Names* names = new (std::nothrow) Names;
+    if (!names) return E_OUTOFMEMORY;
+    size_t count = 0;
+    PVOID state = nullptr;
+    for (;;) {
+        NCryptKeyName* item = nullptr;
+        status = NCryptEnumKeys(provider.h, nullptr, &item, &state, NCRYPT_MACHINE_KEY_FLAG | NCRYPT_SILENT_FLAG);
+        if (status != ERROR_SUCCESS) break;
+        if (item && item->pszName && count < kMaxPurge &&
+            wcsncmp(item->pszName, prefix, prefixLength) == 0 && (!keep[0] || wcscmp(item->pszName, keep) != 0) &&
+            SUCCEEDED(StringCchCopyW(names->value[count], kMaxKeyName, item->pszName))) ++count;
+        if (item) NCryptFreeBuffer(item);
+    }
+    if (state) NCryptFreeBuffer(state);
+    HRESULT result = (status == NTE_NO_MORE_ITEMS) ? S_OK : Status(status);
+    for (size_t i = 0; i < count; ++i) {
+        KeyHandle key;
+        status = NCryptOpenKey(provider.h, &key.h, names->value[i], 0, NCRYPT_MACHINE_KEY_FLAG | NCRYPT_SILENT_FLAG);
+        if (status == NTE_BAD_KEYSET || status == NTE_NOT_FOUND) continue;
+        const HRESULT deleted = status == ERROR_SUCCESS ? key.Delete() : Status(status);
+        if (FAILED(deleted) && SUCCEEDED(result)) result = deleted;
+    }
+    delete names;
+    return result;
 }
 } // namespace tpm
 } // namespace patlock

@@ -33,5 +33,9 @@ HRESULT ProtectKey(PCWSTR identity, const BYTE authValue[32], const BYTE plainKe
 HRESULT UnprotectKey(PCWSTR identity, const BYTE authValue[32], const BYTE wrappedKey[256],
                      BYTE plainKey[32]) noexcept;
 HRESULT DeleteKey(PCWSTR identity) noexcept;
+// Deletes Patlock machine keys whose identity starts with identityPrefix, except
+// keepIdentity (may be null). Removes keys orphaned by earlier failed deletes.
+// Best effort; returns the first failure.
+HRESULT PurgeKeys(PCWSTR identityPrefix, PCWSTR keepIdentity) noexcept;
 } // namespace tpm
 } // namespace patlock

@@ -464,7 +464,15 @@ HRESULT Enroll(PCWSTR name, PCWSTR sid, PCWSTR supplied, const Pattern& pattern)
         Audit(EVENTLOG_INFORMATION_TYPE, 2010, text);
     }
 
-    // Record committed successfully - now safe to retire the old TPM key
+    // Record committed successfully - now safe to retire old TPM keys: leftover
+    // self-test keys, and this account's earlier generations (including keys
+    // orphaned when an earlier build could not delete them).
+    tpm::PurgeKeys(L"PatlockAuthTest_", nullptr);
+    if (createdTpm) {
+        wchar_t accountPrefix[200]{};
+        if (SUCCEEDED(StringCchPrintfW(accountPrefix, ARRAYSIZE(accountPrefix), L"%s_", sid)))
+            tpm::PurgeKeys(accountPrefix, createdIdentity);
+    }
     if (retirePrevious) {
         HRESULT retireHr = tpm::DeleteKey(previousIdentity);
         if (FAILED(retireHr)) {
