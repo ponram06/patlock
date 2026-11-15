@@ -24,9 +24,15 @@ if (-not (Test-Path -LiteralPath $vmrun)) { throw 'vmrun.exe not found. Install 
 if (-not (Test-Path -LiteralPath $Vmx)) { throw "VM not found: $Vmx" }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-$user = [Environment]::GetEnvironmentVariable('PATLOCK_VM_USER', 'User')
-$pass = [Environment]::GetEnvironmentVariable('PATLOCK_VM_PASS', 'User')
-$vmPass = [Environment]::GetEnvironmentVariable('PATLOCK_VM_ENCRYPTION_PASS', 'User')
+# Process environment first (one-off runs), then the saved user setting.
+function Setting([string]$name) {
+    $value = [Environment]::GetEnvironmentVariable($name, 'Process')
+    if (-not $value) { $value = [Environment]::GetEnvironmentVariable($name, 'User') }
+    return $value
+}
+$user = Setting 'PATLOCK_VM_USER'
+$pass = Setting 'PATLOCK_VM_PASS'
+$vmPass = Setting 'PATLOCK_VM_ENCRYPTION_PASS'
 $vmAuth = @(); if ($vmPass) { $vmAuth = @('-vp', $vmPass) }
 function Guest([string[]]$arguments) {
     if (-not $user -or -not $pass) { throw 'Set PATLOCK_VM_USER and PATLOCK_VM_PASS first (see the top of this script).' }
