@@ -7,8 +7,8 @@ instead of typing a password or PIN.
   <img src="docs/media/demo-unlock.gif" alt="Drawing a pattern on the Windows lock screen unlocks the PC" width="300">
 </p>
 
-<p align="center"><a href="docs/media/patlock-demo.mp4">Full demo video (38 s)</a>: lock, unlock with the
-pattern, switch to Password and back.</p>
+<p align="center"><a href="docs/media/patlock-demo.mp4">Demo video (8 s)</a>: from the lock screen, a look at
+the Password option, then unlock with the pattern.</p>
 
 > [!WARNING]
 > **Experimental.** Patlock has been built and tested only inside a Windows 11 virtual
