@@ -81,6 +81,15 @@ constexpr int GridSpacing = PatternLayout::Spacing;
 constexpr int GridTopY    = PatternLayout::Top;
 constexpr int HitRadius   = PatternLayout::HitRadius;
 
+// The credential-provider surface must keep the compact native PIN geometry.
+// Desktop enrollment gets its own roomy, self-contained card.
+constexpr int DesktopCardWidth = 360;
+constexpr int DesktopCardHeight = 410;
+constexpr int DesktopGridSpacing = 82;
+constexpr int DesktopGridTop = 134;
+constexpr int DesktopStatusTop = 350;
+constexpr int DesktopStatusHeight = 24;
+
 // ── State ────────────────────────────────────────────────────────────────────
 
 enum class VisualState {
@@ -131,6 +140,30 @@ struct State {
     ULONGLONG fadeStart = 0;
     bool fadeRed = false;
 };
+
+int ContentWidth(const State& state) noexcept {
+    return state.desktopCard ? DesktopCardWidth : WindowW;
+}
+
+int ContentHeight(const State& state) noexcept {
+    return state.desktopCard ? DesktopCardHeight : WindowH;
+}
+
+int ContentGridSpacing(const State& state) noexcept {
+    return state.desktopCard ? DesktopGridSpacing : GridSpacing;
+}
+
+int ContentGridTop(const State& state) noexcept {
+    return state.desktopCard ? DesktopGridTop : GridTopY;
+}
+
+int ContentStatusTop(const State& state) noexcept {
+    return state.desktopCard ? DesktopStatusTop : PatternLayout::StatusTop;
+}
+
+int ContentStatusHeight(const State& state) noexcept {
+    return state.desktopCard ? DesktopStatusHeight : PatternLayout::StatusHeight;
+}
 
 // The window is modeless: it must never run its own message loop inside LogonUI,
 // or LogonUI cannot process clicks on "Sign-in options" / the user list. Every
@@ -260,13 +293,16 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
     const RECT area = monitor.rcWork;
     const int width = area.right - area.left;
     const int height = area.bottom - area.top;
+    const int contentWidth = ContentWidth(state);
+    const int contentHeight = ContentHeight(state);
     state.scale = (std::min)(static_cast<double>(dpi) / 96.0,
-        (std::min)(static_cast<double>(width - 16) / WindowW, static_cast<double>(height - 16) / WindowH));
+        (std::min)(static_cast<double>(width - 16) / contentWidth, static_cast<double>(height - 16) / contentHeight));
     if (state.scale < 0.5) return false; // Decline when controls cannot remain usable.
-    const int w = static_cast<int>(WindowW * state.scale);
-    const int h = static_cast<int>(WindowH * state.scale);
+    const int w = static_cast<int>(contentWidth * state.scale);
+    const int h = static_cast<int>(contentHeight * state.scale);
     int preferredX = area.left + (width - w) / 2;
-    int preferredY = area.top + height / 2 + static_cast<int>(PatternLayout::FallbackCenterOffset * state.scale);
+    int preferredY = state.desktopCard ? area.top + (height - h) / 2
+        : area.top + height / 2 + static_cast<int>(PatternLayout::FallbackCenterOffset * state.scale);
     if (state.hasAnchor) {
         // Center under the native username and start just below it, exactly
         // where LogonUI places its own PIN box.
@@ -292,7 +328,7 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
     state.background = brush;
     auto scaled = [&state](int value) { return static_cast<int>(value * state.scale); };
     if (!SetWindowPos(window, HWND_TOP, x, y, w, h, SWP_NOACTIVATE) ||
-        !MoveWindow(state.status, scaled(20), scaled(PatternLayout::StatusTop), scaled(WindowW - 40), scaled(PatternLayout::StatusHeight), TRUE) ||
+        !MoveWindow(state.status, scaled(20), scaled(ContentStatusTop(state)), scaled(contentWidth - 40), scaled(ContentStatusHeight(state)), TRUE) ||
         !MoveWindow(state.fallback, 0, 0, 0, 0, FALSE)) return false; // Hidden: native "Sign-in options" replaces it.
     // Only the margin is color-key transparent. An opaque panel keeps text
     // readable and prevents LogonUI account text showing through the controls.
@@ -316,10 +352,14 @@ struct Layout {
 Layout Grid(HWND window) noexcept {
     RECT r{};
     GetClientRect(window, &r);
+    const auto* state = reinterpret_cast<const State*>(GetWindowLongPtrW(window, DWLP_USER));
+    const int contentWidth = state ? ContentWidth(*state) : WindowW;
+    const int spacingLogical = state ? ContentGridSpacing(*state) : GridSpacing;
+    const int topLogical = state ? ContentGridTop(*state) : GridTopY;
     const int cw = static_cast<int>(r.right);
-    const double scale = static_cast<double>(cw) / WindowW;
-    const int spacing = static_cast<int>(GridSpacing * scale);
-    return {cw / 2 - spacing, static_cast<int>(GridTopY * scale), spacing, static_cast<int>(HitRadius * scale)};
+    const double scale = static_cast<double>(cw) / contentWidth;
+    const int spacing = static_cast<int>(spacingLogical * scale);
+    return {cw / 2 - spacing, static_cast<int>(topLogical * scale), spacing, static_cast<int>(HitRadius * scale)};
 }
 
 POINT Dot(Layout grid, int dot) noexcept {
@@ -892,7 +932,7 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         HDC hdc = BeginPaint(window, &paint);
         RECT physical{};
         GetClientRect(window, &physical);
-        RECT rect{0, 0, WindowW, WindowH};
+        RECT rect{0, 0, ContentWidth(*state), ContentHeight(*state)};
 
         // Double buffer
         HDC memDC = CreateCompatibleDC(hdc);
@@ -950,10 +990,16 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 g.DrawPath(&cardBorder, &cardPath);
                 Gdiplus::FontFamily family(L"Segoe UI");
                 Gdiplus::Font titleFont(&family, 13.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+                Gdiplus::Font detailFont(&family, 10.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
                 Gdiplus::StringFormat center;
                 center.SetAlignment(Gdiplus::StringAlignmentCenter);
+                center.SetLineAlignment(Gdiplus::StringAlignmentCenter);
                 Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 226, 231, 243));
-                g.DrawString(L"Draw your pattern", -1, &titleFont, Gdiplus::RectF(0.0f, 8.0f, static_cast<float>(WindowW), 20.0f), &center, &titleBrush);
+                Gdiplus::SolidBrush detailBrush(Gdiplus::Color(255, 166, 178, 202));
+                g.DrawString(L"Draw your pattern", -1, &titleFont, Gdiplus::RectF(0.0f, 30.0f, static_cast<float>(ContentWidth(*state)), 24.0f), &center, &titleBrush);
+                g.DrawString(L"Connect at least 5 dots", -1, &detailFont, Gdiplus::RectF(0.0f, 58.0f, static_cast<float>(ContentWidth(*state)), 18.0f), &center, &detailBrush);
+                Gdiplus::Pen divider(Gdiplus::Color(255, 55, 65, 87), 1.0f);
+                g.DrawLine(&divider, 40.0f, 94.5f, static_cast<float>(ContentWidth(*state) - 40), 94.5f);
             }
 
             // ── Colors by state ──────────────────────────────────────────────
@@ -975,7 +1021,8 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
                 coreColor = Palette(*state, coreColor, COLOR_HIGHLIGHTTEXT);
                 discBg = Palette(*state, discBg, COLOR_HIGHLIGHT);
             }
-            const Layout grid{WindowW / 2 - GridSpacing, GridTopY, GridSpacing, HitRadius};
+            const int gridSpacing = ContentGridSpacing(*state);
+            const Layout grid{ContentWidth(*state) / 2 - gridSpacing, ContentGridTop(*state), gridSpacing, HitRadius};
 
             // ── Anti-Aliased Connecting Lines with Rounded Caps ──────────────
             Gdiplus::Pen linePen(lineColor, 3.0f);
