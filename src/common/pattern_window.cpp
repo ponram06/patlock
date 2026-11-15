@@ -226,7 +226,20 @@ struct AnchorQuery {
     RECT rect{};
     bool found = false;
     LONG limitTop = 0;       // Top of the first native element below the username (0 = none found).
+    bool diagnose = false;   // Log the layout seen below the username (initial lookup only).
 };
+
+// Temporary layout diagnostics (event 2100, Application log, source "Patlock"):
+// screen rectangles, DPI and element text lengths only. Never names, patterns,
+// passwords or keys. Remove once high-DPI placement is verified.
+constexpr bool kLayoutDiagnostics = true;
+void LayoutEvent(PCWSTR text) noexcept {
+    if constexpr (!kLayoutDiagnostics) return;
+    HANDLE source = RegisterEventSourceW(nullptr, L"Patlock");
+    if (!source) return;
+    ReportEventW(source, EVENTLOG_INFORMATION_TYPE, 0, 2100, nullptr, 1, 0, &text, nullptr);
+    DeregisterEventSource(source);
+}
 
 // Finds the top of the first LogonUI element below the username in the same
 // column (normally "Sign-in options"). Matched by position, not text, so it
@@ -243,6 +256,10 @@ void FindLimitBelow(IUIAutomation* uia, IUIAutomationElement* root, AnchorQuery&
         int count = 0;
         items->get_Length(&count);
         LONG best = LONG_MAX;
+        wchar_t diag[1024]{};
+        int listed = 0;
+        if (query.diagnose) StringCchPrintfW(diag, ARRAYSIZE(diag), L"below-username elements=%d name=%ld,%ld,%ld,%ld:",
+            count, name.left, name.top, name.right, name.bottom);
         for (int i = 0; i < count; ++i) {
             IUIAutomationElement* element = nullptr;
             if (FAILED(items->GetElement(i, &element)) || !element) continue;
@@ -250,6 +267,18 @@ void FindLimitBelow(IUIAutomation* uia, IUIAutomationElement* root, AnchorQuery&
             RECT r{};
             BSTR text = nullptr;
             element->get_CurrentIsOffscreen(&offscreen);
+            if (query.diagnose && listed < 14 && SUCCEEDED(element->get_CurrentBoundingRectangle(&r)) &&
+                r.bottom > r.top && r.top > name.bottom) {
+                BSTR peek = nullptr;
+                const UINT length = SUCCEEDED(element->get_CurrentName(&peek)) && peek ? SysStringLen(peek) : 0;
+                if (peek) SysFreeString(peek);
+                wchar_t item[80]{};
+                StringCchPrintfW(item, ARRAYSIZE(item), L" [t=%ld h=%ld w=%ld dx=%ld len=%u off=%d]",
+                    r.top, r.bottom - r.top, r.right - r.left, (r.left + r.right) / 2 - centerX, length, offscreen ? 1 : 0);
+                StringCchCatW(diag, ARRAYSIZE(diag), item);
+                ++listed;
+            }
+            r = RECT{};
             if (!offscreen && SUCCEEDED(element->get_CurrentBoundingRectangle(&r)) &&
                 r.right > r.left && r.bottom > r.top && r.top > name.bottom + 2 &&
                 (r.bottom - r.top) <= 3 * nameHeight &&
@@ -264,6 +293,12 @@ void FindLimitBelow(IUIAutomation* uia, IUIAutomationElement* root, AnchorQuery&
         }
         items->Release();
         if (best != LONG_MAX) query.limitTop = best;
+        if (query.diagnose) {
+            wchar_t tail[48]{};
+            StringCchPrintfW(tail, ARRAYSIZE(tail), L" chosen limit=%ld", query.limitTop);
+            StringCchCatW(diag, ARRAYSIZE(diag), tail);
+            LayoutEvent(diag);
+        }
     }
     all->Release();
 }
@@ -368,6 +403,7 @@ bool FindUsernameAnchor(HWND owner, const wchar_t* name, RECT* out, LONG* limitT
         query->root = GetAncestor(owner, GA_ROOT);
         if (!query->root) query->root = owner;
         query->name = name;
+        query->diagnose = limitTop != nullptr; // Only the initial lookup of a new window.
         HANDLE thread = StartAnchorQuery(query);
         if (!thread) return false;
         const ULONGLONG deadline = GetTickCount64() + 500;
@@ -445,6 +481,13 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
         const double available = static_cast<double>(state.limitTop - state.anchor.bottom) - margin;
         const double fit = available / (PatternLayout::AnchorGap + contentHeight);
         if (fit >= 0.6 && fit < state.scale) state.scale = fit;
+    }
+    if (state.hasAnchor && !state.desktopCard) {
+        wchar_t diag[256]{};
+        StringCchPrintfW(diag, ARRAYSIZE(diag), L"layout dpi=%u work=%ld,%ld,%ld,%ld anchor=%ld,%ld,%ld,%ld limit=%ld scale=%.3f",
+            dpi, area.left, area.top, area.right, area.bottom, state.anchor.left, state.anchor.top,
+            state.anchor.right, state.anchor.bottom, state.limitTop, state.scale);
+        LayoutEvent(diag);
     }
     if (state.scale < 0.5) return false; // Decline when controls cannot remain usable.
     const int w = static_cast<int>(contentWidth * state.scale);
