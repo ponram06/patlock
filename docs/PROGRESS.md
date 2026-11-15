@@ -12,6 +12,29 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-15 (later): Phase 6 packaging, kill switch, input polish, VM automation
+- Verified by the agent in the VM (via vmrun): builds 8e7acc9, 8768cff and 275fbbe
+  compile with no compiler warnings and pass all 6 CTest targets; update.ps1 deploys;
+  `Build-Release.ps1` produces an unsigned `dist\Patlock-Release.zip` (installer,
+  uninstaller, provider, enrollment tool, SHA256SUMS, README, RECOVERY).
+- Verified by the human in the VM (screen recordings): enrollment and lock-screen unlock
+  work; earlier stroke breaks no longer occur. Recordings showed (and these were then
+  fixed, not yet re-verified): enrollment window vanishing on the last dot, early submit
+  on a mid-stroke pause during enrollment, missed corner dot, hint crowding the grid.
+- Written in this round:
+  - Status line above the grid; enrollment: green confirm flash, 1 s pause to submit,
+    larger hit radius (34 of 82), retry the confirmation on mismatch.
+  - Esc restarts the current stroke (never uses an attempt).
+  - Kill switch: `HKLM\SOFTWARE\Policies\Patlock DisableProvider=1` makes
+    SetUsageScenario return E_NOTIMPL for logon/unlock, so no Pattern tile is shown.
+    Offline WinRE procedure in RECOVERY.md.
+  - `install\vm-remote.ps1`: host-side vmrun helper (status, screenshot, update, logs).
+- Not verified yet: kill switch on the lock screen; Esc on the lock screen (Windows may
+  also react to Esc); package install via Install.cmd -AllowUnsigned; Safe Mode and
+  WinRE removal rehearsal; 150%/200% DPI and high contrast; Phase 7a on the real trackpad.
+- Phase 7a: `pattern_window_demo.exe` built in the VM was copied to the host Desktop for
+  the human to run (no install, no registry changes).
+
 ### 2026-11-15: TPM key cleanup fix, pattern UI refresh, one-step update.cmd
 - Problem reported from the VM: re-enrolling showed "an old TPM key could not be
   retired (error 0x80090009)". 0x80090009 is NTE_BAD_FLAGS: the Platform Crypto

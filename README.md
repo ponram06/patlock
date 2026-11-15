@@ -6,9 +6,11 @@ See [launcher instructions](docs/ONE_CLICK_VM_TEST.md). Never run it on the host
 
 **Current candidate: record format 7. Format 5/6 records still work, but re-enroll to get the
 format 7 protections (see [current storage](docs/CURRENT_STORAGE.md)).**
-This candidate has not yet been built or lock-screen tested. Follow
-[VM_ACCEPTANCE.md](docs/VM_ACCEPTANCE.md) and [release status](docs/RELEASE_STATUS.md).
-Build and run provider tests only inside the VM.
+Status (2026-11-15): builds without warnings and passes CTest in the Windows 11 VM;
+enrollment and lock-screen unlock were exercised by the maintainer in the VM. It has
+**not** been tested on real hardware, is unsigned, and has had no independent security
+review. Follow [VM_ACCEPTANCE.md](docs/VM_ACCEPTANCE.md) and
+[release status](docs/RELEASE_STATUS.md). Build and run provider tests only inside the VM.
 
 Patlock is an Android-style 3x3 pattern sign-in for the Windows lock and sign-in screens, drawn with the laptop trackpad or mouse.
 
@@ -29,8 +31,12 @@ Patlock comprises four core components:
    - Never filters, replaces, or alters built-in Windows credential providers.
 
 2. **Pattern Window (`src/common/pattern_window.cpp`)**:
-   - Custom modal GDI-based 3x3 pattern grid dialog.
-   - Supports continuous mouse/trackpad dragging, tap-and-drag, and diagonal crossings.
+   - Modeless, per-pixel-alpha 3x3 grid anchored under the native username; the
+     status line sits above the grid.
+   - Draw by press-drag-release, or without holding a button: rest briefly on a dot,
+     move through the dots, and pause (0.65 s) to submit. Using all nine dots submits
+     at once. Leaving the grid, lifting a finger or a dropped drag does not cancel.
+   - **Esc** restarts the current stroke; an unsubmitted stroke never uses an attempt.
    - Implements the prototype's skipped-dot rule (e.g. crossing between unvisited opposite corner dots automatically captures the center dot).
    - Enforces a minimum length of 5 dots.
    - Includes optional "Hide trail" mode to resist shoulder surfing.
@@ -90,6 +96,10 @@ Patlock comprises four core components:
 - Windows 11 (or Windows 10 x64)
 - Visual Studio 2022 with **Desktop development with C++** workload
 - CMake 3.24 or newer
+
+### One-step update (VM)
+Inside the VM, run `update.cmd`: it elevates, pulls, finds Visual Studio/CMake, builds,
+runs CTest and deploys only if every test passes.
 
 ### Build with CMake
 Inside the **Windows 11 VM**, open Developer PowerShell for VS 2022:
@@ -155,4 +165,6 @@ If sign-in is ever interrupted:
 1. Revert your VM snapshot.
 2. Or boot into Windows Safe Mode (hold Shift while clicking Restart -> Troubleshoot -> Advanced options -> Startup Settings -> Restart -> 4) and run `install\unregister.reg`.
 3. Or sign in with the backup administrator account using the standard Password tile.
+4. Or hide the Pattern tile without uninstalling (kill switch, also settable offline from WinRE):
+   `reg add HKLM\SOFTWARE\Policies\Patlock /v DisableProvider /t REG_DWORD /d 1 /f`
 See `docs/RECOVERY.md` for complete recovery procedures.
