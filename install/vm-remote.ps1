@@ -12,7 +12,7 @@
 param(
     [Parameter(Mandatory)][ValidateSet('Status', 'Screenshot', 'Update', 'Logs')][string]$Action,
     [string]$Vmx = "$env:USERPROFILE\Documents\Virtual Machines\Windows 11 x64 devop\Windows 11 x64 devop.vmx",
-    [string]$GuestRepo = 'C:\Windows\System32\patlock',
+    [string]$GuestRepo = 'C:\patlock',
     [string]$OutDir = (Join-Path $env:TEMP 'patlock-vm')
 )
 Set-StrictMode -Version Latest

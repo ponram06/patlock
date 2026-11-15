@@ -168,3 +168,8 @@ If sign-in is ever interrupted:
 4. Or hide the Pattern tile without uninstalling (kill switch, also settable offline from WinRE):
    `reg add HKLM\SOFTWARE\Policies\Patlock /v DisableProvider /t REG_DWORD /d 1 /f`
 See `docs/RECOVERY.md` for complete recovery procedures.
+
+---
+
+## License
+MIT. See [LICENSE](LICENSE). Parts of `src/provider` come from Microsoft's SampleCredentialProvider (MIT, [src/provider/LICENSE.microsoft](src/provider/LICENSE.microsoft)). Provided "as is", without warranty.
