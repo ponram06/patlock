@@ -26,10 +26,8 @@ if (-not (Test-Path -LiteralPath $source)) {
 
 Write-Host "Deploying PatlockProvider.dll to System32..." -ForegroundColor Cyan
 
-# Terminate logonui if it is holding the DLL open
-Stop-Process -Name logonui -Force -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 300
-
+# LogonUI is never terminated here: killing it can leave the session without a
+# working lock screen. A loaded DLL is renamed aside below and replaced on next load.
 $copied = $false
 try {
     Copy-Item -LiteralPath $source -Destination $destination -Force -ErrorAction Stop
@@ -47,9 +45,17 @@ $clsid = '{21d42e91-a8c0-4e63-b5d7-372d8585982c}'
 $providerKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$clsid"
 $classKey = "HKLM:\SOFTWARE\Classes\CLSID\$clsid"
 if (-not (Test-Path -LiteralPath $providerKey) -or -not (Test-Path -LiteralPath $classKey)) {
+    # Register exactly as install.ps1 does (full path plus ownership markers), so
+    # uninstall.ps1 recognises the registration and can remove it.
     Write-Host "Registering Patlock Credential Provider in Windows..." -ForegroundColor Cyan
-    $regFile = Join-Path $PSScriptRoot "register.reg"
-    Start-Process -FilePath "reg.exe" -ArgumentList "import", "`"$regFile`"" -Wait -NoNewWindow
+    $marker = 'Patlock Pattern Provider'
+    New-Item -Path "$classKey\InprocServer32" -Force | Out-Null
+    Set-Item -LiteralPath $classKey -Value $marker
+    Set-Item -LiteralPath "$classKey\InprocServer32" -Value $destination
+    New-ItemProperty -LiteralPath "$classKey\InprocServer32" -Name ThreadingModel -Value Apartment -PropertyType String -Force | Out-Null
+    # Register the tile last. No provider filter or built-in provider is touched.
+    New-Item -Path $providerKey -Force | Out-Null
+    Set-Item -LiteralPath $providerKey -Value $marker
 }
 
 # Verify deployment
