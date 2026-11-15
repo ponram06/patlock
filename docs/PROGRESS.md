@@ -34,8 +34,12 @@ Update after every session. Keep it honest: separate "written" from "verified on
   worked, agent confirmed both keys absent after a normal boot, update.ps1 re-registered).
   Lesson: Safe Mode opened a 32-bit cmd, so `reg import` of a file under System32 failed;
   RECOVERY.md now gives file-free `reg delete ... /reg:64` commands.
+- Phase 7a (human, real laptop trackpad, pattern_window_demo on the host): reported as
+  working well. Values kept unchanged: hit radius 30/72 (lock) and 34/82 (desktop),
+  start dwell 80 ms, pause-to-submit 650 ms (lock) / 1000 ms (desktop), short-stroke
+  timeout 1800 ms. Tap-and-drag and palm-contact cases were not reported separately.
 - Not verified yet: package install via Install.cmd -AllowUnsigned; WinRE offline kill
-  switch; 150%/200% DPI and high contrast; Phase 7a feedback on the real trackpad.
+  switch; 150%/200% DPI and high contrast; lock-screen feel on real hardware (Phase 7b).
 - Phase 7a: `pattern_window_demo.exe` built in the VM was copied to the host Desktop for
   the human to run (no install, no registry changes).
 
