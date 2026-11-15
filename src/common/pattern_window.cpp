@@ -1030,8 +1030,9 @@ INT_PTR CALLBACK Dialog(HWND window, UINT message, WPARAM wp, LPARAM lp) noexcep
         const LONG limit = static_cast<LONG>(static_cast<ULONG>(wp));
         // A reading that would need an implausibly small grid is ignored and never
         // replaces a good one, so a transient element cannot make the grid jump.
+        // Same measure as Configure: the scale at which the block would just fit.
         const double room = static_cast<double>(limit - state->anchor.bottom) /
-            ((PatternLayout::AnchorGap + ContentHeight(*state)) * (GetDpiForWindow(window) / 96.0));
+            (PatternLayout::AnchorGap + ContentHeight(*state));
         if (limit > 0 && room < 0.6) return TRUE;
         if (limit != state->limitTop) {
             state->limitTop = limit;
