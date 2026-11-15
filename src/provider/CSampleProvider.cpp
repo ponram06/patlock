@@ -42,6 +42,16 @@ CSampleProvider::~CSampleProvider()
     DllRelease();
 }
 
+// Recovery kill switch: HKLM\SOFTWARE\Policies\Patlock, DWORD DisableProvider = 1
+// hides the Pattern tile without uninstalling. It can be set from Safe Mode,
+// another admin account, or offline from WinRE (see docs/RECOVERY.md).
+static bool PatlockKillSwitchSet() noexcept
+{
+    DWORD value = 0, size = sizeof(value);
+    return RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Policies\\Patlock", L"DisableProvider",
+        RRF_RT_REG_DWORD | RRF_SUBKEY_WOW6464KEY, nullptr, &value, &size) == ERROR_SUCCESS && value == 1;
+}
+
 HRESULT CSampleProvider::SetUsageScenario(
     CREDENTIAL_PROVIDER_USAGE_SCENARIO cpus,
     DWORD /*dwFlags*/)
@@ -52,6 +62,13 @@ HRESULT CSampleProvider::SetUsageScenario(
     {
     case CPUS_LOGON:
     case CPUS_UNLOCK_WORKSTATION:
+        if (PatlockKillSwitchSet())
+        {
+            // Same answer the sample gives for unsupported scenarios: LogonUI then
+            // shows no Pattern tile at all. Password and other providers are untouched.
+            hr = E_NOTIMPL;
+            break;
+        }
         _cpus = cpus;
         _fRecreateEnumeratedCredentials = true;
         hr = S_OK;

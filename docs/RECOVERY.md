@@ -14,6 +14,24 @@ If sign-in breaks:
    `Program Files\Patlock\Uninstall-Patlock.ps1`.
 4. Or use Windows Recovery Environment, open Command Prompt, and remove the registry key from the offline hive.
 
+## Kill switch (hide the Pattern tile without uninstalling)
+Setting this value makes the provider decline every sign-in scenario, so LogonUI shows no
+Pattern tile; Password and other providers are unaffected. Delete it (or set 0) to re-enable.
+
+- From any admin prompt (another admin account, or Safe Mode):
+  ```
+  reg add HKLM\SOFTWARE\Policies\Patlock /v DisableProvider /t REG_DWORD /d 1 /f
+  ```
+- Offline, from Windows Recovery Environment > Troubleshoot > Command Prompt. The Windows
+  drive is often not `C:` there; find it with `dir D:\Windows` (or E:, F:). If BitLocker is on,
+  unlock it first with `manage-bde -unlock D: -RecoveryPassword <key>`.
+  ```
+  reg load HKLM\OFFSOFT D:\Windows\System32\config\SOFTWARE
+  reg add "HKLM\OFFSOFT\Policies\Patlock" /v DisableProvider /t REG_DWORD /d 1 /f
+  reg unload HKLM\OFFSOFT
+  ```
+  Then restart. Rehearse this once in the VM before any real-hardware install.
+
 Never:
 - Install an untested build on your main PC.
 - Delete or modify built-in providers.
