@@ -231,8 +231,9 @@ struct AnchorQuery {
 
 // Temporary layout diagnostics (event 2100, Application log, source "Patlock"):
 // screen rectangles, DPI and element text lengths only. Never names, patterns,
-// passwords or keys. Remove once high-DPI placement is verified.
-constexpr bool kLayoutDiagnostics = true;
+// passwords or keys. Off since high-DPI placement was verified (175%, 2026-11-15);
+// turn on to diagnose placement on another machine.
+constexpr bool kLayoutDiagnostics = false;
 void LayoutEvent(PCWSTR text) noexcept {
     if constexpr (!kLayoutDiagnostics) return;
     HANDLE source = RegisterEventSourceW(nullptr, L"Patlock");
@@ -407,7 +408,7 @@ bool FindUsernameAnchor(HWND owner, const wchar_t* name, RECT* out, LONG* limitT
         query->root = GetAncestor(owner, GA_ROOT);
         if (!query->root) query->root = owner;
         query->name = name;
-        query->diagnose = limitTop != nullptr; // Only the initial lookup of a new window.
+        query->diagnose = kLayoutDiagnostics && limitTop != nullptr; // Only the initial lookup of a new window.
         HANDLE thread = StartAnchorQuery(query);
         if (!thread) return false;
         const ULONGLONG deadline = GetTickCount64() + 500;
@@ -486,7 +487,7 @@ bool Configure(HWND window, State& state, UINT dpi, const RECT* suggested) noexc
         const double fit = available / (PatternLayout::AnchorGap + contentHeight);
         if (fit >= 0.6 && fit < state.scale) state.scale = fit;
     }
-    if (state.hasAnchor && !state.desktopCard) {
+    if constexpr (kLayoutDiagnostics) if (state.hasAnchor && !state.desktopCard) {
         wchar_t diag[256]{};
         StringCchPrintfW(diag, ARRAYSIZE(diag), L"layout dpi=%u work=%ld,%ld,%ld,%ld anchor=%ld,%ld,%ld,%ld limit=%ld scale=%.3f",
             dpi, area.left, area.top, area.right, area.bottom, state.anchor.left, state.anchor.top,

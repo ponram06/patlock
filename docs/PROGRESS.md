@@ -12,6 +12,22 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-15 (evening): Phase 6 checks complete in the VM
+- Verified by the human in the VM: high contrast mode; 175% scaling after the fix below
+  (grid fits between the username and "Sign-in options", unlock works).
+- Verified by the agent in the VM (vmrun) with the human's lock-screen test:
+  `Build-Release.ps1` package -> `Install-Patlock.ps1 -AllowUnsigned -SkipRestorePoint`
+  installed to Program Files, registered, unlock worked; `Uninstall-Patlock.ps1 -Quiet`
+  removed registration, files, data key, ARP entry and TPM keys (including one orphan
+  from an older build). VM then reverted to the pre-test snapshot.
+- 175% fix, diagnosed from layout events (rectangles only): LogonUI reports the username
+  as a 929 px wide element, so the first column filter admitted the user list and picked
+  the wrong limit. Now only elements centred under the name count ("Sign-in options" is
+  2 px off centre), and implausible readings never replace a good one. The grid scales to
+  fit (about 1.29x instead of 1.75x there). Diagnostics are compiled out again.
+- Not verified: 150%/200%, multiple monitors, other display languages (the limit is found
+  by position, not text), Windows 10.
+
 ### 2026-11-15 (later): Phase 6 packaging, kill switch, input polish, VM automation
 - Verified by the agent in the VM (via vmrun): builds 8e7acc9, 8768cff and 275fbbe
   compile with no compiler warnings and pass all 6 CTest targets; update.ps1 deploys;
