@@ -29,9 +29,13 @@ Update after every session. Keep it honest: separate "written" from "verified on
     SetUsageScenario return E_NOTIMPL for logon/unlock, so no Pattern tile is shown.
     Offline WinRE procedure in RECOVERY.md.
   - `install\vm-remote.ps1`: host-side vmrun helper (status, screenshot, update, logs).
-- Not verified yet: kill switch on the lock screen; Esc on the lock screen (Windows may
-  also react to Esc); package install via Install.cmd -AllowUnsigned; Safe Mode and
-  WinRE removal rehearsal; 150%/200% DPI and high contrast; Phase 7a on the real trackpad.
+- Verified by the human in the VM: Esc on the lock screen, the DisableProvider kill switch,
+  and the Safe Mode removal rehearsal (registration removed in Safe Mode, password sign-in
+  worked, agent confirmed both keys absent after a normal boot, update.ps1 re-registered).
+  Lesson: Safe Mode opened a 32-bit cmd, so `reg import` of a file under System32 failed;
+  RECOVERY.md now gives file-free `reg delete ... /reg:64` commands.
+- Not verified yet: package install via Install.cmd -AllowUnsigned; WinRE offline kill
+  switch; 150%/200% DPI and high contrast; Phase 7a feedback on the real trackpad.
 - Phase 7a: `pattern_window_demo.exe` built in the VM was copied to the host Desktop for
   the human to run (no install, no registry changes).
 

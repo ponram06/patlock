@@ -14,6 +14,18 @@ If sign-in breaks:
    `Program Files\Patlock\Uninstall-Patlock.ps1`.
 4. Or use Windows Recovery Environment, open Command Prompt, and remove the registry key from the offline hive.
 
+## Remove the registration without any file (works from Safe Mode)
+Safe Mode can open a **32-bit** Command Prompt (its title contains `wow64`). A 32-bit
+program is silently redirected away from `C:\Windows\System32`, so `reg import` of a file
+there fails with "Error opening the file" (seen in the VM rehearsal, 2026-11-15). These two
+commands need no file, and `/reg:64` targets the right registry view from either prompt:
+```
+reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{21d42e91-a8c0-4e63-b5d7-372d8585982c}" /f /reg:64
+reg delete "HKLM\SOFTWARE\Classes\CLSID\{21d42e91-a8c0-4e63-b5d7-372d8585982c}" /f /reg:64
+```
+Or switch to the 64-bit prompt first by typing `C:\Windows\Sysnative\cmd.exe`.
+Copy/paste into a VM does not work in Safe Mode (VMware Tools user services do not run).
+
 ## Kill switch (hide the Pattern tile without uninstalling)
 Setting this value makes the provider decline every sign-in scenario, so LogonUI shows no
 Pattern tile; Password and other providers are unaffected. Delete it (or set 0) to re-enable.
