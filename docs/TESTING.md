@@ -3,9 +3,13 @@
 Run in the Windows 11 VM first (take a snapshot before each install). Tick each item and record results in `docs/PROGRESS.md`.
 
 ## Install / uninstall
+- [ ] `Build-Release.ps1` stops before packaging if Release x64 build or CTest fails
+- [ ] SHA256SUMS and DLL signature rejection work; unsigned VM testing requires explicit `-AllowUnsigned`
 - [ ] Register script makes the Pattern tile appear on the lock screen
 - [ ] Unregister script removes it completely
 - [ ] Password and PIN options unchanged and working after install
+- [ ] Upgrade registers a hash-versioned DLL and removes or schedules the prior DLL
+- [ ] Uninstall asks for `YES`, preserves records only with `-KeepEnrollments`, then reboots cleanly
 
 ## Enrollment
 - [ ] Wrong Windows password rejected
@@ -29,6 +33,7 @@ Run in the Windows 11 VM first (take a snapshot before each install). Tick each 
 - [ ] Lockout state survives reboot
 - [ ] After about 10 failures Pattern is disabled until explicit Patlock password verification
 - [ ] Counter clears after explicit Patlock password verification
+- [ ] Application log records lockout metadata but no patterns, passwords, keys or hashes
 
 ## Boot & Availability policy (Option A)
 - [ ] Pattern available immediately on lock screen AND sign-in screen after restart

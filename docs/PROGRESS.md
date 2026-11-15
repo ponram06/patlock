@@ -12,6 +12,18 @@ Update after every session. Keep it honest: separate "written" from "verified on
 - Next step:
 
 ## Log
+### 2026-11-15: Release/install documentation and guarded packaging
+- Written: `Build-Release.ps1`, guarded installer/uninstaller, SHA-256 and
+  Authenticode verification, versioned DLL upgrades, Event Log source lifecycle,
+  and production/recovery/test documentation.
+- Written: Event Log audit metadata for enrollment failures, lockouts and TPM
+  retirement failures; no patterns, passwords, keys or hashes are logged.
+- Verification: PowerShell parsing and source/whitespace review only. No host
+  build, CTest, signing, registry/TPM operation, package install, uninstall or
+  lock-screen test was run.
+- VM action: run `Build-Release.ps1`, then the full matrix in PRODUCTION.md and
+  record results before describing any build as production-ready.
+
 ### 2026-11-14: Fix TPM KeyIdentity name mismatch between Enroll and Verify
 - Problem: 'every pattern i draw it says wrong i also resetted the pattern but still it is the same'.
 - Root cause: Commit 2441e62 introduced an ephemeral GUID appended to key name in Enroll(),

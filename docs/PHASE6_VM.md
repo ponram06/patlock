@@ -15,9 +15,9 @@ Expected output:
 - `crypto_policy`: PASS (PBKDF2 hashing, constant-time compare, escalating lockout, secret wipe)
 
 ## 2. Packaging Build Outputs
-Run the packaging script inside the VM:
+Run the guarded release script inside the VM:
 ```powershell
-.\install\package.ps1 -Configuration Release
+.\install\Build-Release.ps1 -CertThumbprint <test-certificate-SHA1>
 ```
 This generates:
 - `dist\Patlock\`: Uncompressed standalone distribution folder.
@@ -30,18 +30,20 @@ Execute the following sequence inside the VM:
 ### Installation & Coexistence
 1. Run:
    ```powershell
-   .\install\install.ps1 -DllPath .\build\Release\PatlockProvider.dll -AcknowledgeVm -SnapshotAndPasswordFallbackVerified
+   Expand-Archive .\dist\Patlock-Release.zip .\dist\Patlock-Release
+   .\dist\Patlock-Release\Install.cmd
    ```
 2. Press `Win+L`:
    - Both "Password" and "Pattern" tiles must be present.
    - Built-in Password sign-in must work normally.
 
 ### Enrollment
-1. Run `.\build\Release\patlock_enroll.exe`.
+1. Run `& "$env:ProgramFiles\Patlock\patlock_enroll.exe"`.
 2. Draw pattern twice; test mismatched pattern rejection.
 3. Test pattern with under 5 dots (rejected).
 4. Successfully enroll with valid 5+ dot pattern.
-5. Confirm whether "TPM-hardened" or "Baseline" mode is reported.
+5. Confirm TPM-backed enrollment succeeds. On a no-TPM VM, confirm enrollment
+   refuses unless the software-key test policy was explicitly enabled.
 
 ### Lock and Unlock
 1. Press `Win+L`.
@@ -79,7 +81,7 @@ Execute the following sequence inside the VM:
 ### Clean Uninstallation
 1. Run:
    ```powershell
-   .\install\uninstall.ps1 -AcknowledgeVm
+   .\dist\Patlock-Release\Uninstall.cmd
    ```
 2. Reboot VM.
 3. Press `Win+L`: verify Pattern tile is completely gone; Password sign-in unaffected.
